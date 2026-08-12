@@ -21,7 +21,6 @@ def send_telegram_plain(text):
             print(f"Telegram error: {e}")
 
 def get_latest_match():
-    """Fetch the most recent match from Firestore matches collection."""
     try:
         docs = db.collection("matches").order_by("stored_at", direction=firestore.Query.DESCENDING).limit(1).stream()
         for doc in docs:
@@ -32,7 +31,7 @@ def get_latest_match():
     return None, None
 
 def main():
-    # 1. Get a match
+    # Fetch a match
     match_id, match_data = get_latest_match()
     if not match_data:
         send_telegram_plain("No matches found in Firestore.")
@@ -42,7 +41,6 @@ def main():
     away = match_data.get("away", "")
     print(f"Using match: {home} vs {away}")
 
-    # 2. Build search query
     query = f"{home} {away} betpawa"
     search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&hl=en&gl=us"
     print(f"Search URL: {search_url}")
@@ -51,11 +49,13 @@ def main():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # 3. Navigate to Google search
         page.goto(search_url, timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(3000)
 
-        # 4. Extract all links that contain betpawa.ng
+        title = page.title()
+        body_text = page.inner_text("body")[:1200]
+
+        # Capture Betpawa links
         links = page.evaluate("""() => {
             const anchors = Array.from(document.querySelectorAll('a'));
             return anchors
@@ -64,25 +64,11 @@ def main():
                 .slice(0, 10);
         }""")
 
-        if not links:
-            send_telegram_plain("No Betpawa.ng links found on Google first page. Could be CAPTCHA or different results.")
-            browser.close()
-            return
-
-        target_url = links[0]
-        print(f"Opening first Betpawa link: {target_url}")
-
-        # 5. Open the match page directly
-        page.goto(target_url, timeout=30000, wait_until="networkidle")
-        page.wait_for_timeout(5000)
-
-        # 6. Extract page text (first 2500 characters)
-        body_text = page.inner_text("body")[:2500]
         browser.close()
 
-    # 7. Send to Telegram
-    message = f"🔍 Google search test successful\nMatch: {home} vs {away}\nURL: {target_url}\n\nPage text snippet:\n{body_text}"
-    send_telegram_plain(message[:4000])  # split if needed
+    # Compose diagnostic message
+    message = f"🔍 Google Search Diagnostic\nMatch: {home} vs {away}\nPage title: {title}\nBetpawa links found: {len(links)}\n\nBody snippet:\n{body_text}"
+    send_telegram_plain(message[:4000])
 
 if __name__ == "__main__":
     main()
