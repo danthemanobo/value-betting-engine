@@ -1,5 +1,4 @@
 import os, json, requests
-from datetime import datetime, timezone, timedelta
 from firebase_admin import credentials, firestore, initialize_app
 
 # ── Init ──
@@ -14,7 +13,6 @@ db = firestore.client()
 
 BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# ── Telegram ──
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try:
@@ -24,23 +22,17 @@ def send_telegram(text):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-# ── Main ──
 def main():
-    now_utc = datetime.now(timezone.utc)
-    time_from = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    time_to = (now_utc + timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"Scanning at {time_from} (manual test)")
+    print("Fetching all upcoming soccer matches...")
 
     params = {
         "apiKey": API_KEY,
         "regions": "eu",
-        "markets": "h2h,totals,btts,double_chance",
-        "oddsFormat": "decimal",
-        "commenceTimeFrom": time_from,
-        "commenceTimeTo": time_to
+        "markets": "h2h,totals,both_teams_to_score,double_chance",  # 'btts' corrected to official key
+        "oddsFormat": "decimal"
     }
     try:
-        resp = requests.get(f"{BASE_URL}/upcoming/odds", params=params, timeout=30)
+        resp = requests.get(f"{BASE_URL}/soccer_epl/odds", params=params, timeout=30)  # change to soccer_epl for EPL only? Or keep broad: /upcoming is not a valid sport key; we need a sport key like 'soccer_epl' or 'soccer'. We'll use 'soccer' for all leagues.
         resp.raise_for_status()
         matches = resp.json()
     except Exception as e:
@@ -51,18 +43,18 @@ def main():
     print(f"Fetched {len(matches)} matches")
 
     if not matches:
-        send_telegram("ℹ️ No matches in the next 90 minutes.")
+        send_telegram("ℹ️ No upcoming matches found.")
         return
 
-    for match in matches[:5]:
-        match_id = match['id']
-        db.collection('matches').document(match_id).set({
-            'home': match['home_team'],
-            'away': match['away_team'],
-            'kickoff': match['commence_time']
-        }, merge=True)
+    # Log first match to Firestore as test
+    first = matches[0]
+    db.collection('matches').document(first['id']).set({
+        'home': first['home_team'],
+        'away': first['away_team'],
+        'kickoff': first['commence_time']
+    }, merge=True)
 
-    send_telegram(f"✅ Test scan done. {len(matches)} matches found. First: {matches[0]['home_team']} vs {matches[0]['away_team']}")
+    send_telegram(f"✅ Test scan done. {len(matches)} matches found. First: {first['home_team']} vs {first['away_team']}")
     print("Done")
 
 if __name__ == '__main__':
