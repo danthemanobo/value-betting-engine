@@ -36,7 +36,7 @@ def send_telegram(text):
 # ── Main (no time check) ──
 def main():
     now_utc = datetime.now(timezone.utc)
-    print(f"Scanning at {now_utc.isoformat()} (manual test)")
+    print(f"Scanning at {now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")} (manual test)")
 
     # 1. Fetch matches from API for next 90 minutes
     params = {
@@ -44,8 +44,8 @@ def main():
         "regions": "eu",
         "markets": "h2h,totals,btts,double_chance",
         "oddsFormat": "decimal",
-        "commenceTimeFrom": now_utc.isoformat(),
-        "commenceTimeTo": (now_utc + timedelta(minutes=90)).isoformat()
+        "commenceTimeFrom": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "commenceTimeTo": (now_utc + timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
     }
     try:
         resp = requests.get(f"{BASE_URL}/upcoming/odds", params=params, timeout=30)
