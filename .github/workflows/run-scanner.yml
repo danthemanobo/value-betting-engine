@@ -12,16 +12,9 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install -r requirements.txt
-      - run: python -m playwright install --with-deps chromium
-      - name: Run Pinnacle scraper
+      - name: Test Odds API
         env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-        run: python pinnacle_scraper.py
-      - name: Run Betpawa scraper
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-        run: python scraper.py
+        run: python test_api.py
