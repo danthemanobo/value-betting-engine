@@ -57,13 +57,21 @@ def main():
                 break
 
         if target:
-            debug.append(f"\nUsing target container: class='{target['class']}', scrollH={target['scrollHeight']}, clientH={target['clientHeight']}")
-            # Scroll this container
+            class_name = target['class']
+            debug.append(f"\nUsing target container: class='{class_name}', scrollH={target['scrollHeight']}, clientH={target['clientHeight']}")
+            # Build a CSS selector for the class (if class is not empty)
+            if class_name:
+                selector = "." + ".".join(class_name.split())
+            else:
+                # fallback: use tag
+                selector = target['tag']
+
             for step in range(1, 11):
-                page.evaluate("""(class) => {
-                    const el = document.querySelector(class);
+                # Scroll the target container by 800px
+                page.evaluate("""(sel) => {
+                    const el = document.querySelector(sel);
                     if (el) el.scrollTop += 800;
-                }""", "." + target['class'].split(' ').join('.'))
+                }""", selector)
                 page.wait_for_timeout(2000)
                 count = page.locator("div[class*='event']").count()
                 debug.append(f"After scroll {step}: count={count}")
@@ -75,7 +83,6 @@ def main():
                 return { overflowY: style.overflowY, scrollHeight: body.scrollHeight, clientHeight: body.clientHeight };
             }""")
             debug.append(f"Body: {body_info}")
-            # Try scrolling window again after waiting longer
             page.wait_for_timeout(5000)
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(2000)
