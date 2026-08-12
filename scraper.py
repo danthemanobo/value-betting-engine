@@ -45,7 +45,7 @@ def parse_match_text(text):
     try:
         now = get_real_utc_now()
         dt = datetime.strptime(f"{now.year} {date_str} {time_str}", "%Y %m/%d %I:%M %p")
-        # Assume Betpawa shows West Africa Time (UTC+1), convert to UTC
+        # Betpawa shows West Africa Time (UTC+1), convert to UTC
         kickoff_utc = dt - timedelta(hours=1)
         kickoff_utc = kickoff_utc.replace(tzinfo=timezone.utc)
     except:
@@ -88,23 +88,42 @@ def main():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Go directly to the events page (no login needed)
+        # Navigate directly to 1X2 events
         page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(3000)
 
-        # Scroll to load more
-        for _ in range(5):
+        # Aggressive scrolling with count tracking
+        last_count = 0
+        stable_count = 0
+        max_scrolls = 50
+        total_loaded = 0
+        for scroll in range(max_scrolls):
+            # Scroll down by viewport height
             page.evaluate("window.scrollBy(0, window.innerHeight)")
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(1500)
+
+            # Count current match elements
+            current_count = page.locator("div[class*='event']").count()
+            if current_count > last_count:
+                last_count = current_count
+                stable_count = 0
+                total_loaded = current_count
+            else:
+                stable_count += 1
+                if stable_count >= 5:  # No new matches for 5 consecutive scrolls
+                    break
 
         match_elements = page.query_selector_all("div[class*='event']")
-        print(f"Scraped {len(match_elements)} matches from Betpawa")
+        loaded_count = len(match_elements)
+        print(f"Loaded {loaded_count} match elements after scrolling")
 
-        # Load Firestore matches in window
+        # Fetch all Firestore matches in the 90-minute window
         fs_matches = db.collection("matches").where("kickoff", ">=", now_utc.isoformat()).where("kickoff", "<", window_end.isoformat()).stream()
         firestore_data = {doc.id: doc.to_dict() for doc in fs_matches}
-        print(f"Firestore matches in window: {len(firestore_data)}")
+        firestore_count = len(firestore_data)
+        print(f"Firestore matches in window: {firestore_count}")
 
+        # Now loop through all loaded match elements
         for elem in match_elements:
             parsed = parse_match_text(elem.inner_text())
             if not parsed:
@@ -147,10 +166,18 @@ def main():
 
         browser.close()
 
+    # Send final report
+    report_lines = [
+        f"🔍 Betpawa scroll test:",
+        f"Loaded {loaded_count} match elements.",
+        f"Firestore matches in window: {firestore_count}"
+    ]
     if alerts:
-        send_telegram(f"🚀 +EV Alerts (Betpawa):\n" + "\n\n".join(alerts[:10]))
+        report_lines.append(f"🚀 +EV Alerts ({len(alerts)}):")
+        report_lines.extend(alerts[:10])
     else:
-        send_telegram(f"ℹ️ No +EV bets. Betpawa matches: {len(match_elements)}, Firestore matches in window: {len(firestore_data)}")
+        report_lines.append("ℹ️ No +EV bets found in this window.")
+    send_telegram("\n".join(report_lines))
 
 if __name__ == "__main__":
     main()
