@@ -34,17 +34,10 @@ def get_real_utc_now():
     return datetime.now(timezone.utc)
 
 def strip_accents(s):
-    """Remove diacritics: 'Atlético' -> 'Atletico'."""
-    return ''.join(
-        c for c in unicodedata.normalize('NFD', s)
-        if unicodedata.category(c) != 'Mn'
-    )
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
 def normalize(name):
-    """Normalize team name: remove accents, hyphens, extra spaces."""
-    no_accents = strip_accents(name)
-    no_hyphens = no_accents.replace('-', ' ')
-    return re.sub(r'\s+', ' ', no_hyphens).strip()
+    return re.sub(r'\s+', ' ', strip_accents(name).replace('-', ' ')).strip()
 
 def parse_odds_from_page(page):
     odds = {"home": None, "draw": None, "away": None}
@@ -80,34 +73,42 @@ def parse_odds_from_page(page):
     return odds
 
 def get_fresh_search_input(page):
-    """Click search icon and return a fresh input element."""
-    # Click icon to reveal input
     search_icon = page.query_selector("button[aria-label*='search' i]")
     if search_icon:
         search_icon.click()
         page.wait_for_timeout(1500)
-    # Return fresh input
     return page.query_selector('input[type="search"], input[type="text"], input:not([type])')
 
-def search_and_extract(page, home_norm, away_norm):
-    """Search for a match and return (found, url, odds, msg)."""
-    search_terms = [
-        home_norm,
-        home_norm.split(' ')[0] if ' ' in home_norm else home_norm,
-        f"{home_norm} {away_norm}"
+def get_match_title(page):
+    """Try to extract a heading/title that indicates the two teams."""
+    selectors = [
+        "h1", "h2", "div[class*='title']", "div[class*='heading']",
+        "span[class*='team']", "div[class*='team']"
     ]
+    for sel in selectors:
+        el = page.query_selector(sel)
+        if el:
+            txt = el.inner_text().strip()
+            if len(txt) > 3:
+                return txt
+    return "Unknown title"
 
-    for term in search_terms:
-        # Always get a fresh input before each attempt
-        search_input = get_fresh_search_input(page)
-        if not search_input:
-            return False, None, None, "Search input not found"
-        search_input.click()
-        search_input.fill("")
+def search_and_extract(page, home_norm):
+    """Search for home team, click first non-simulated football result, return (found, url, odds, title, msg)."""
+    # Try a few search terms
+    terms = [home_norm]
+    if ' ' in home_norm:
+        terms.append(home_norm.split(' ')[0])
+    for term in terms:
+        input_el = get_fresh_search_input(page)
+        if not input_el:
+            return False, None, None, "No search input", "No input"
+        input_el.click()
+        input_el.fill("")
         page.wait_for_timeout(200)
-        search_input.fill(term)
+        input_el.fill(term)
         page.wait_for_timeout(300)
-        search_input.press("Enter")
+        input_el.press("Enter")
         page.wait_for_timeout(4000)
 
         result_elements = page.query_selector_all("div[class*='event']")
@@ -115,9 +116,8 @@ def search_and_extract(page, home_norm, away_norm):
             text = elem.inner_text()
             if 'eFootball' in text or 'Simulated' in text or 'Esoccer' in text:
                 continue
-            # Compare using accent‑insensitive normalized strings
-            text_norm = strip_accents(text)
-            if fuzz.partial_ratio(home_norm, text_norm) > 70 and fuzz.partial_ratio(away_norm, text_norm) > 70:
+            # Only require home team to be present (fuzzy)
+            if fuzz.partial_ratio(home_norm, strip_accents(text)) > 60:
                 anchor = elem.query_selector("a")
                 if anchor:
                     href = anchor.get_attribute("href")
@@ -126,9 +126,9 @@ def search_and_extract(page, home_norm, away_norm):
                         page.goto(full_url, timeout=30000, wait_until="networkidle")
                         page.wait_for_timeout(5000)
                         odds = parse_odds_from_page(page)
-                        return True, full_url, odds, f"Found with term: {term}"
-        # After each term, the input may be stale; next iteration will re-query
-    return False, None, None, "No match after trying multiple terms"
+                        title = get_match_title(page)
+                        return True, full_url, odds, title, f"Found with term: {term}"
+    return False, None, None, "No match after search", "No title"
 
 def main():
     now_utc = get_real_utc_now()
@@ -161,9 +161,9 @@ def main():
             away_norm = normalize(away_raw)
             debug_line = ""
             try:
-                found, url, odds, msg = search_and_extract(page, home_norm, away_norm)
+                found, url, odds, title, msg = search_and_extract(page, home_norm)
                 if not found:
-                    # Get first few search results for diagnosis
+                    # Capture search results for diagnosis
                     result_elements = page.query_selector_all("div[class*='event']")
                     sample = []
                     for e in result_elements[:2]:
@@ -172,7 +172,7 @@ def main():
                     debug_line = f"❌ Not found: {home_raw} vs {away_raw}\nReason: {msg}\nSample results:\n{sample_text}"
                 else:
                     true_probs = match.get("true_probs_1x2")
-                    debug_line = f"✅ {home_raw} vs {away_raw}\nURL: {url}\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
+                    debug_line = f"✅ {home_raw} vs {away_raw}\nURL: {url}\nTitle: {title}\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
                     if true_probs:
                         ev_home = (true_probs["home"] * odds["home"]) - 1
                         ev_draw = (true_probs["draw"] * odds["draw"]) - 1
@@ -186,7 +186,7 @@ def main():
                             alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Away @ {odds['away']} (EV +{ev_away*100:.1f}%)\nBetpawa")
                     else:
                         debug_line += "\n⚠️ Missing true_probs_1x2"
-                    # Return to events page
+                    # Return to events page for next search
                     page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
                     page.wait_for_timeout(2000)
             except Exception as e:
