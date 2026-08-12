@@ -1,4 +1,4 @@
-import os, json, requests
+import os, json, requests, re
 from playwright.sync_api import sync_playwright
 
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
@@ -26,7 +26,7 @@ def main():
         page.goto("https://www.pinnacle.com/en/soccer/leagues/", timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(5000)
 
-        # Extract top league links, filter out highlights/live/futures
+        # Extract top league links (real leagues only)
         links = page.eval_on_selector_all(
             "a",
             """els => els
@@ -36,18 +36,14 @@ def main():
                 .filter(x => x.text.length > 0)
                 .slice(0, 10)"""
         )
-        debug_info.append(f"Filtered league links: {len(links)}")
-        for i, l in enumerate(links[:10], 1):
-            debug_info.append(f"{i}. {l['text']} -> {l['href']}")
-
         if not links:
-            send_telegram_plain("🔍 Pinnacle League Debug:\n" + "\n".join(debug_info))
+            send_telegram_plain("No leagues found.")
             browser.close()
             return
 
         # Visit first real league
         first_league = links[0]
-        debug_info.append(f"\nVisiting first real league: {first_league['text']}")
+        debug_info.append(f"Visiting: {first_league['text']}")
         page.goto(first_league['href'], timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(5000)
 
@@ -56,38 +52,58 @@ def main():
             page.evaluate("window.scrollBy(0, window.innerHeight)")
             page.wait_for_timeout(1000)
 
-        # Find match elements (metadata)
-        match_elements = page.query_selector_all("div[class*='match']")
-        debug_info.append(f"Found {len(match_elements)} match elements.")
-
-        if match_elements:
-            # Get the parent element of the first match, which likely contains odds
-            first_match = match_elements[0]
-            parent_html = first_match.evaluate("el => el.parentElement.outerHTML")
-            # Also get all numeric text within parent
-            numeric_texts = first_match.evaluate(
-                """el => {
-                    const parent = el.parentElement;
-                    const nums = [];
-                    const walker = document.createTreeWalker(parent, NodeFilter.SHOW_TEXT);
-                    while (walker.nextNode()) {
-                        const t = walker.currentNode.textContent.trim();
-                        if (/^\d+\.\d+$/.test(t)) nums.push(t);
+        # Scan all elements for decimal odds text
+        odds_elements = page.evaluate("""() => {
+            const results = [];
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            const seen = new Set();
+            while (walker.nextNode()) {
+                const text = walker.currentNode.textContent.trim();
+                if (/^\\d+\\.\\d{2}$/.test(text)) {
+                    const el = walker.currentNode.parentElement;
+                    if (!el) continue;
+                    // climb up to a container that has multiple odds
+                    let ancestor = el;
+                    for (let i=0; i<4; i++) {
+                        if (ancestor.parentElement) ancestor = ancestor.parentElement;
                     }
-                    return nums;
-                }"""
-            )
-            debug_info.append(f"Numeric odds inside parent: {numeric_texts}")
-            debug_info.append(f"Parent outerHTML (full):\n{parent_html[:10000]}")
+                    const key = ancestor.outerHTML;
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        results.push({
+                            text: text,
+                            tag: el.tagName,
+                            class: el.className || '',
+                            ancestorHTML: ancestor.outerHTML.slice(0, 1000)
+                        });
+                    }
+                }
+            }
+            return results.slice(0, 5); // first 5 unique
+        }""")
 
+        if odds_elements:
+            debug_info.append(f"Found {len(odds_elements)} unique odds elements (showing first 5).")
+            for i, item in enumerate(odds_elements, 1):
+                debug_info.append(f"\n--- Odds element {i} ---")
+                debug_info.append(f"Text: {item['text']}")
+                debug_info.append(f"Tag: {item['tag']}")
+                debug_info.append(f"Class: {item['class']}")
+                debug_info.append(f"Ancestor HTML:\n{item['ancestorHTML']}")
         else:
-            body_text = page.inner_text("body")[:1000]
-            debug_info.append(f"No match elements. Body snippet:\n{body_text}")
+            debug_info.append("No decimal odds found on the page. The odds might require clicking a match or are not loaded.")
+            # Try clicking the first match element to see if odds appear
+            first_match = page.query_selector("div[class*='match']")
+            if first_match:
+                first_match.click()
+                page.wait_for_timeout(3000)
+                body_text = page.inner_text("body")[:1000]
+                debug_info.append(f"After click body sample:\n{body_text}")
 
         browser.close()
 
-    full_message = "🔍 Pinnacle League Debug:\n" + "\n\n".join(debug_info)
-    send_telegram_plain(full_message[:15000])  # will be split into chunks
+    full_msg = "🔍 Pinnacle Odds Hunt:\n" + "\n\n".join(debug_info)
+    send_telegram_plain(full_msg[:12000])
     print("Debug sent.")
 
 if __name__ == "__main__":
