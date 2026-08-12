@@ -9,8 +9,6 @@ cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT)
 initialize_app(cred)
 db = firestore.client()
 
-BETPAWA_USER = os.environ.get('BETPAWA_USERNAME', '')
-BETPAWA_PASS = os.environ.get('BETPAWA_PASSWORD', '')
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
@@ -33,47 +31,32 @@ def get_real_utc_now():
     return datetime.now(timezone.utc)
 
 def parse_match_text(text):
-    """
-    Given the inner text of a match element, extract:
-    - kickoff datetime (UTC)
-    - home team, away team
-    - odds: {home, draw, away}
-    Returns None if parsing fails.
-    """
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     if len(lines) < 6:
         return None
 
-    # First line usually contains time and date: "8:30 am Wed 12/08"
     time_pattern = r"(\d{1,2}:\d{2}\s*[ap]m)\s*\w{3}\s*(\d{2}/\d{2})"
     time_match = re.search(time_pattern, lines[0], re.IGNORECASE)
     if not time_match:
         return None
 
-    time_str = time_match.group(1)  # e.g., "8:30 am"
-    date_str = time_match.group(2)  # e.g., "12/08"
-    # Convert to datetime
+    time_str = time_match.group(1)
+    date_str = time_match.group(2)
     try:
-        # Assume year is current year (we'll get from real UTC now)
         now = get_real_utc_now()
         dt = datetime.strptime(f"{now.year} {date_str} {time_str}", "%Y %m/%d %I:%M %p")
-        # Make it timezone-aware (Betpawa times are likely local Nigeria time, which is UTC+1)
-        # We'll assume UTC+1 for now. To be safe, we could treat as UTC if no timezone given.
-        from datetime import timedelta
-        kickoff_utc = dt - timedelta(hours=1)  # convert from WAT (UTC+1) to UTC
+        # Assume Betpawa shows West Africa Time (UTC+1), convert to UTC
+        kickoff_utc = dt - timedelta(hours=1)
         kickoff_utc = kickoff_utc.replace(tzinfo=timezone.utc)
     except:
         return None
 
-    # Teams are the next two lines after the time line
-    # But there may be league info between teams and odds. We'll look for the odds block.
-    # The odds typically appear as "1\n2.05\nX\n3.30\n2\n3.59"
+    # Find odds block
     odds_idx = None
     for i, line in enumerate(lines):
         if line == '1' and i+1 < len(lines) and re.match(r'\d+\.\d+', lines[i+1]):
             odds_idx = i
             break
-
     if odds_idx is None or odds_idx < 2:
         return None
 
@@ -82,7 +65,6 @@ def parse_match_text(text):
     if not home_team or not away_team:
         return None
 
-    # Extract odds
     try:
         home_odds = float(lines[odds_idx+1])
         draw_odds = float(lines[odds_idx+3])
@@ -101,58 +83,37 @@ def main():
     now_utc = get_real_utc_now()
     window_end = now_utc + timedelta(minutes=90)
     alerts = []
-    debug_info = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Optional login
-        try:
-            page.goto("https://www.betpawa.ng/", timeout=30000, wait_until="networkidle")
-            login_btn = page.query_selector("text=Login") or page.query_selector("a:has-text('Login')")
-            if login_btn:
-                login_btn.click()
-                page.wait_for_timeout(2000)
-                if BETPAWA_USER:
-                    page.fill('input[type="tel"], input[placeholder="Phone number"]', BETPAWA_USER)
-                    page.fill('input[type="password"]', BETPAWA_PASS)
-                    page.click("button:has-text('Login')")
-                    page.wait_for_timeout(5000)
-        except Exception as e:
-            debug_info.append(f"Login optional: {e}")
-
-        # Navigate directly to 1X2 events
+        # Go directly to the events page (no login needed)
         page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(3000)
 
-        # Scroll to load more matches
+        # Scroll to load more
         for _ in range(5):
             page.evaluate("window.scrollBy(0, window.innerHeight)")
             page.wait_for_timeout(2000)
 
-        # Extract match elements
         match_elements = page.query_selector_all("div[class*='event']")
-        debug_info.append(f"Found {len(match_elements)} matches")
+        print(f"Scraped {len(match_elements)} matches from Betpawa")
 
-        # Fetch all Firestore matches that are within our window
+        # Load Firestore matches in window
         fs_matches = db.collection("matches").where("kickoff", ">=", now_utc.isoformat()).where("kickoff", "<", window_end.isoformat()).stream()
-        firestore_data = {}
-        for doc in fs_matches:
-            data = doc.to_dict()
-            firestore_data[doc.id] = data
+        firestore_data = {doc.id: doc.to_dict() for doc in fs_matches}
+        print(f"Firestore matches in window: {len(firestore_data)}")
 
         for elem in match_elements:
-            text = elem.inner_text()
-            parsed = parse_match_text(text)
+            parsed = parse_match_text(elem.inner_text())
             if not parsed:
                 continue
-
             kickoff = parsed["kickoff_utc"]
             if not (now_utc <= kickoff < window_end):
                 continue
 
-            # Find matching Firestore entry using fuzzy team name + time
+            # Find matching Firestore document
             best_match = None
             best_score = 0
             for match_id, fs in firestore_data.items():
@@ -160,24 +121,17 @@ def main():
                     fs_kickoff = datetime.fromisoformat(fs["kickoff"].replace("Z", "+00:00"))
                 except:
                     continue
-                if abs((fs_kickoff - kickoff).total_seconds()) > 300:  # within 5 minutes
+                if abs((fs_kickoff - kickoff).total_seconds()) > 300:
                     continue
-                score_home = fuzz.ratio(parsed["home"], fs.get("home", ""))
-                score_away = fuzz.ratio(parsed["away"], fs.get("away", ""))
-                score = (score_home + score_away) / 2
+                score = (fuzz.ratio(parsed["home"], fs.get("home", "")) + fuzz.ratio(parsed["away"], fs.get("away", ""))) / 2
                 if score > best_score and score > 70:
                     best_score = score
                     best_match = fs
 
-            if not best_match:
+            if not best_match or "true_probs_1x2" not in best_match:
                 continue
 
-            # Get Pinnacle true probabilities
-            true_probs = best_match.get("true_probs_1x2")
-            if not true_probs:
-                continue
-
-            # Calculate EV for each selection
+            true_probs = best_match["true_probs_1x2"]
             odds = parsed["odds"]
             ev_home = (true_probs["home"] * odds["home"]) - 1
             ev_draw = (true_probs["draw"] * odds["draw"]) - 1
@@ -185,18 +139,18 @@ def main():
 
             match_name = f"{parsed['home']} vs {parsed['away']}"
             if ev_home > MIN_EV:
-                alerts.append(f"⚽ {match_name}\n1X2 Home @ {odds['home']} (EV +{ev_home*100:.1f}%)\nBetpawa")
+                alerts.append(f"⚽ {match_name}\n1X2 Home @ {odds['home']} (EV +{ev_home*100:.1f}%)")
             if ev_draw > MIN_EV:
-                alerts.append(f"⚽ {match_name}\n1X2 Draw @ {odds['draw']} (EV +{ev_draw*100:.1f}%)\nBetpawa")
+                alerts.append(f"⚽ {match_name}\n1X2 Draw @ {odds['draw']} (EV +{ev_draw*100:.1f}%)")
             if ev_away > MIN_EV:
-                alerts.append(f"⚽ {match_name}\n1X2 Away @ {odds['away']} (EV +{ev_away*100:.1f}%)\nBetpawa")
+                alerts.append(f"⚽ {match_name}\n1X2 Away @ {odds['away']} (EV +{ev_away*100:.1f}%)")
 
         browser.close()
 
     if alerts:
-        send_telegram(f"🚀 +EV Betpawa Alerts:\n" + "\n\n".join(alerts[:10]))
+        send_telegram(f"🚀 +EV Alerts (Betpawa):\n" + "\n\n".join(alerts[:10]))
     else:
-        send_telegram(f"ℹ️ No +EV bets. Matches scraped: {len(match_elements)}. Debug: {'; '.join(debug_info)}")
+        send_telegram(f"ℹ️ No +EV bets. Betpawa matches: {len(match_elements)}, Firestore matches in window: {len(firestore_data)}")
 
 if __name__ == "__main__":
     main()
