@@ -5,7 +5,6 @@ BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
 def send_telegram_plain(text):
-    """Send plain text message, splitting if too long."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     max_len = 4000
     for i in range(0, len(text), max_len):
@@ -23,12 +22,11 @@ def main():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # 1. Load Leagues page
-        print("Loading leagues page...")
+        # Load leagues page
         page.goto("https://www.pinnacle.com/en/soccer/leagues/", timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(5000)
 
-        # 2. Extract top league links, filtering out highlights/live/futures
+        # Extract top league links, filter out highlights/live/futures
         links = page.eval_on_selector_all(
             "a",
             """els => els
@@ -43,30 +41,45 @@ def main():
             debug_info.append(f"{i}. {l['text']} -> {l['href']}")
 
         if not links:
-            debug_info.append("No real league links found.")
             send_telegram_plain("🔍 Pinnacle League Debug:\n" + "\n".join(debug_info))
             browser.close()
             return
 
-        # 3. Visit the first real league link
+        # Visit first real league
         first_league = links[0]
         debug_info.append(f"\nVisiting first real league: {first_league['text']}")
         page.goto(first_league['href'], timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(5000)
 
-        # 4. Scroll to load matches
+        # Scroll to load matches
         for _ in range(5):
             page.evaluate("window.scrollBy(0, window.innerHeight)")
             page.wait_for_timeout(1000)
 
-        # 5. Find match elements
+        # Find match elements (metadata)
         match_elements = page.query_selector_all("div[class*='match']")
         debug_info.append(f"Found {len(match_elements)} match elements.")
 
         if match_elements:
-            # Get outerHTML of first match, truncate to reasonable size
-            first_html = match_elements[0].evaluate("el => el.outerHTML")
-            debug_info.append(f"First match outerHTML (truncated):\n{first_html[:2500]}")
+            # Get the parent element of the first match, which likely contains odds
+            first_match = match_elements[0]
+            parent_html = first_match.evaluate("el => el.parentElement.outerHTML")
+            # Also get all numeric text within parent
+            numeric_texts = first_match.evaluate(
+                """el => {
+                    const parent = el.parentElement;
+                    const nums = [];
+                    const walker = document.createTreeWalker(parent, NodeFilter.SHOW_TEXT);
+                    while (walker.nextNode()) {
+                        const t = walker.currentNode.textContent.trim();
+                        if (/^\d+\.\d+$/.test(t)) nums.push(t);
+                    }
+                    return nums;
+                }"""
+            )
+            debug_info.append(f"Numeric odds inside parent: {numeric_texts}")
+            debug_info.append(f"Parent outerHTML (full):\n{parent_html[:10000]}")
+
         else:
             body_text = page.inner_text("body")[:1000]
             debug_info.append(f"No match elements. Body snippet:\n{body_text}")
@@ -74,7 +87,7 @@ def main():
         browser.close()
 
     full_message = "🔍 Pinnacle League Debug:\n" + "\n\n".join(debug_info)
-    send_telegram_plain(full_message[:10000])  # Split automatically
+    send_telegram_plain(full_message[:15000])  # will be split into chunks
     print("Debug sent.")
 
 if __name__ == "__main__":
