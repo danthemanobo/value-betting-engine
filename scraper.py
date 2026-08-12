@@ -31,17 +31,13 @@ def get_real_utc_now():
     return datetime.now(timezone.utc)
 
 def normalize(name):
-    """Remove hyphens and extra spaces for better search matching."""
     return re.sub(r'\s+', ' ', name.replace('-', ' ').strip())
 
 def parse_odds_from_page(page):
-    """Extract 1X2 odds from a Betpawa match page."""
     odds = {"home": None, "draw": None, "away": None}
     try:
-        # Look for elements containing decimal odds; often in spans/buttons with class containing 'price' or 'odd'
         price_elements = page.query_selector_all("span[class*='price'], span[class*='odd'], button[class*='price']")
         if not price_elements:
-            # fallback: find all text nodes with decimal numbers
             numbers = page.evaluate("""() => {
                 const res = [];
                 const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -53,9 +49,7 @@ def parse_odds_from_page(page):
             }""")
             numbers = [float(x) for x in numbers if float(x) > 1.0]
             if len(numbers) >= 3:
-                odds["home"] = numbers[0]
-                odds["draw"] = numbers[1]
-                odds["away"] = numbers[2]
+                odds = {"home": numbers[0], "draw": numbers[1], "away": numbers[2]}
         else:
             prices = []
             for el in price_elements:
@@ -67,9 +61,7 @@ def parse_odds_from_page(page):
                 except:
                     continue
             if len(prices) >= 3:
-                odds["home"] = prices[0]
-                odds["draw"] = prices[1]
-                odds["away"] = prices[2]
+                odds = {"home": prices[0], "draw": prices[1], "away": prices[2]}
     except Exception as e:
         print(f"Odds extraction error: {e}")
     return odds
@@ -81,7 +73,6 @@ def main():
     matched_count = 0
     failed_count = 0
 
-    # Fetch Pinnacle matches in window
     fs_matches = db.collection("matches").where("kickoff", ">=", now_utc.isoformat()).where("kickoff", "<", window_end.isoformat()).stream()
     matches_list = []
     for doc in fs_matches:
@@ -97,21 +88,8 @@ def main():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Go to Betpawa events page once
         page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(3000)
-
-        # Click search icon to reveal search input
-        search_icon = page.query_selector("button[aria-label*='search' i]")
-        if search_icon:
-            search_icon.click()
-            page.wait_for_timeout(1500)
-
-        search_input = page.query_selector('input[type="search"], input[type="text"], input:not([type])')
-        if not search_input:
-            send_telegram("❌ Betpawa search input not found. Aborting scraper.")
-            browser.close()
-            return
 
         for match in matches_list:
             home_raw = match.get("home", "")
@@ -119,7 +97,19 @@ def main():
             home_norm = normalize(home_raw)
             away_norm = normalize(away_raw)
 
-            # Search for home team; we'll filter results by both teams later
+            # Every iteration: click search icon, then get fresh input
+            search_icon = page.query_selector("button[aria-label*='search' i]")
+            if search_icon:
+                search_icon.click()
+                page.wait_for_timeout(1500)
+
+            search_input = page.query_selector('input[type="search"], input[type="text"], input:not([type])')
+            if not search_input:
+                send_telegram("❌ Search input not found. Aborting.")
+                browser.close()
+                return
+
+            # Clear, type, and submit search
             search_input.click()
             search_input.fill("")
             page.wait_for_timeout(300)
@@ -128,16 +118,13 @@ def main():
             search_input.press("Enter")
             page.wait_for_timeout(4000)
 
-            # Collect result elements
             result_elements = page.query_selector_all("div[class*='event']")
             found_match = False
             for elem in result_elements:
                 text = elem.inner_text()
-                # Filter out eFootball/simulated
                 if 'eFootball' in text or 'Simulated' in text or 'Esoccer' in text:
                     continue
 
-                # Check if both team names appear (fuzzy)
                 if fuzz.partial_ratio(home_norm, text) > 70 and fuzz.partial_ratio(away_norm, text) > 70:
                     found_match = True
                     anchor = elem.query_selector("a")
@@ -167,18 +154,10 @@ def main():
                                 body_snippet = page.inner_text("body")[:500]
                                 print(f"Odds extraction failed for {home_raw} vs {away_raw}. Snippet: {body_snippet}")
 
-                            # Go back to events page for next search
+                            # Return to events page
                             page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
                             page.wait_for_timeout(2000)
-                            # Re-click search icon
-                            search_icon = page.query_selector("button[aria-label*='search' i]")
-                            if search_icon:
-                                search_icon.click()
-                                page.wait_for_timeout(1000)
-                            search_input = page.query_selector('input[type="search"], input[type="text"], input:not([type])')
-                            if not search_input:
-                                print("Search input lost after returning. Continuing may fail.")
-                            break  # exit loop once match processed
+                            break
             if not found_match:
                 failed_count += 1
                 print(f"Match not found on Betpawa: {home_raw} vs {away_raw}")
