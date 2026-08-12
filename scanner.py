@@ -14,15 +14,6 @@ db = firestore.client()
 
 BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# ── De‑vig (just copy functions, they won't be fully used now) ──
-def de_vig_two_way(o1, o2):
-    imp1 = 1/o1; imp2 = 1/o2; ov = imp1+imp2
-    return imp1/ov, imp2/ov
-
-def de_vig_three_way(o1, o2, o3):
-    imp1 = 1/o1; imp2 = 1/o2; imp3 = 1/o3; ov = imp1+imp2+imp3
-    return imp1/ov, imp2/ov, imp3/ov
-
 # ── Telegram ──
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -33,19 +24,20 @@ def send_telegram(text):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-# ── Main (no time check) ──
+# ── Main ──
 def main():
     now_utc = datetime.now(timezone.utc)
-    print(f"Scanning at {now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")} (manual test)")
+    time_from = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    time_to = (now_utc + timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"Scanning at {time_from} (manual test)")
 
-    # 1. Fetch matches from API for next 90 minutes
     params = {
         "apiKey": API_KEY,
         "regions": "eu",
         "markets": "h2h,totals,btts,double_chance",
         "oddsFormat": "decimal",
-        "commenceTimeFrom": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "commenceTimeTo": (now_utc + timedelta(minutes=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        "commenceTimeFrom": time_from,
+        "commenceTimeTo": time_to
     }
     try:
         resp = requests.get(f"{BASE_URL}/upcoming/odds", params=params, timeout=30)
@@ -62,17 +54,12 @@ def main():
         send_telegram("ℹ️ No matches in the next 90 minutes.")
         return
 
-    # 2. (Simplified) Just log to Firestore and send a test message
-    for match in matches[:5]:  # only log first 5 to keep it quick
+    for match in matches[:5]:
         match_id = match['id']
-        home = match['home_team']
-        away = match['away_team']
-        kickoff = match['commence_time']
-        # Write a minimal doc to Firestore
         db.collection('matches').document(match_id).set({
-            'home': home,
-            'away': away,
-            'kickoff': kickoff
+            'home': match['home_team'],
+            'away': match['away_team'],
+            'kickoff': match['commence_time']
         }, merge=True)
 
     send_telegram(f"✅ Test scan done. {len(matches)} matches found. First: {matches[0]['home_team']} vs {matches[0]['away_team']}")
