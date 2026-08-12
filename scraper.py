@@ -51,7 +51,6 @@ def parse_match_text(text):
     except:
         return None
 
-    # Find odds block
     odds_idx = None
     for i, line in enumerate(lines):
         if line == '1' and i+1 < len(lines) and re.match(r'\d+\.\d+', lines[i+1]):
@@ -88,42 +87,45 @@ def main():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Navigate directly to 1X2 events
+        # Navigate to Betpawa 1X2 events
         page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(3000)
 
-        # Aggressive scrolling with count tracking
+        # Scroll the correct container to load all matches
+        container_selector = ".ScrollableWrapper_container__U3Z_d"  # discovered from debug
         last_count = 0
         stable_count = 0
-        max_scrolls = 50
-        total_loaded = 0
-        for scroll in range(max_scrolls):
-            # Scroll down by viewport height
-            page.evaluate("window.scrollBy(0, window.innerHeight)")
+        max_attempts = 50
+        final_count = 0
+        for attempt in range(max_attempts):
+            # Scroll the container to the bottom
+            page.evaluate("""(sel) => {
+                const el = document.querySelector(sel);
+                if (el) el.scrollTop = el.scrollHeight;
+            }""", container_selector)
             page.wait_for_timeout(1500)
 
-            # Count current match elements
             current_count = page.locator("div[class*='event']").count()
             if current_count > last_count:
                 last_count = current_count
                 stable_count = 0
-                total_loaded = current_count
+                final_count = current_count
             else:
                 stable_count += 1
-                if stable_count >= 5:  # No new matches for 5 consecutive scrolls
+                if stable_count >= 5:  # no new matches for 5 consecutive scroll-to-bottom attempts
                     break
 
         match_elements = page.query_selector_all("div[class*='event']")
         loaded_count = len(match_elements)
-        print(f"Loaded {loaded_count} match elements after scrolling")
+        print(f"Loaded {loaded_count} match elements after scrolling container")
 
-        # Fetch all Firestore matches in the 90-minute window
+        # Fetch Firestore matches in window
         fs_matches = db.collection("matches").where("kickoff", ">=", now_utc.isoformat()).where("kickoff", "<", window_end.isoformat()).stream()
         firestore_data = {doc.id: doc.to_dict() for doc in fs_matches}
         firestore_count = len(firestore_data)
         print(f"Firestore matches in window: {firestore_count}")
 
-        # Now loop through all loaded match elements
+        # Compare
         for elem in match_elements:
             parsed = parse_match_text(elem.inner_text())
             if not parsed:
@@ -132,7 +134,6 @@ def main():
             if not (now_utc <= kickoff < window_end):
                 continue
 
-            # Find matching Firestore document
             best_match = None
             best_score = 0
             for match_id, fs in firestore_data.items():
@@ -166,18 +167,16 @@ def main():
 
         browser.close()
 
-    # Send final report
-    report_lines = [
-        f"🔍 Betpawa scroll test:",
-        f"Loaded {loaded_count} match elements.",
-        f"Firestore matches in window: {firestore_count}"
+    # Report
+    lines = [
+        f"🔍 Betpawa final: loaded {loaded_count} matches, Firestore in window: {firestore_count}",
     ]
     if alerts:
-        report_lines.append(f"🚀 +EV Alerts ({len(alerts)}):")
-        report_lines.extend(alerts[:10])
+        lines.append(f"🚀 +EV Alerts ({len(alerts)}):")
+        lines.extend(alerts[:10])
     else:
-        report_lines.append("ℹ️ No +EV bets found in this window.")
-    send_telegram("\n".join(report_lines))
+        lines.append("ℹ️ No +EV bets found.")
+    send_telegram("\n".join(lines))
 
 if __name__ == "__main__":
     main()
