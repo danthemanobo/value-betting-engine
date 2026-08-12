@@ -13,8 +13,8 @@ jobs:
           python-version: '3.10'
       - run: pip install -r requirements.txt
       - run: python -m playwright install --with-deps chromium
-      - name: Inspect Betpawa NEXT_DATA
+      - name: Betpawa scroll debug
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python betpawa_nextdata_debug.py
+        run: python betpawa_scroll_debug.py
