@@ -35,18 +35,17 @@ def get_real_utc_now():
 def main():
     now_utc = get_real_utc_now()
     window_end = now_utc + timedelta(minutes=90)
-    alerts = []
     debug_info = []
+    alerts = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         # 1. Login
-        print("Navigating to Betpawa login...")
+        print("Logging in...")
         page.goto("https://www.betpawa.ng/", timeout=30000, wait_until="networkidle")
         try:
-            # Try to click login button (adjust if site has a different flow)
             login_btn = page.query_selector("text=Login") or page.query_selector("a:has-text('Login')")
             if login_btn:
                 login_btn.click()
@@ -56,55 +55,56 @@ def main():
             page.click("button:has-text('Login')")
             page.wait_for_timeout(5000)
         except Exception as e:
-            print(f"Login exception (may be already logged in): {e}")
+            debug_info.append(f"Login skipped: {e}")
 
-        # 2. Navigate to football section
-        print("Navigating to football...")
-        page.goto("https://www.betpawa.ng/sport/soccer", timeout=30000, wait_until="networkidle")
+        # 2. Go directly to the upcoming matches URL (1X2 market)
+        target_url = "https://www.betpawa.ng/events?categoryId=2&marketId=1X2"
+        print(f"Navigating to {target_url}")
+        page.goto(target_url, timeout=30000, wait_until="networkidle")
         page.wait_for_timeout(3000)
-        debug_info.append(f"Page title: {page.title()}")
 
-        # 3. Try to find match elements (broad selector)
-        # We'll try multiple common selectors and see which one catches anything
+        # 3. Scroll down to load more matches
+        for i in range(5):  # scroll 5 times
+            page.evaluate("window.scrollBy(0, window.innerHeight)")
+            page.wait_for_timeout(2000)
+
+        # 4. Try to find match elements with common betting site selectors
         selectors = [
-            "div.event",
-            "div.match",
-            "div[class*='event']",
-            "div[class*='match']",
-            "div[class*='game']",
-            "article",
-            "div.row"  # very generic, just to see if something exists
+            "div.event", "div.match-row", "div[class*='event']", "div[class*='match']",
+            "div[class*='game']", "article", "div.row", "div.col"  # very generic last
         ]
         match_elements = []
         used_selector = None
         for sel in selectors:
             elems = page.query_selector_all(sel)
-            if len(elems) > 0:
+            if len(elems) > 3:  # at least a few matches
                 match_elements = elems
                 used_selector = sel
                 break
+
         if not match_elements:
-            # No matches found with any selector – grab page text to diagnose
-            body_text = page.inner_text("body")[:500]
-            debug_info.append(f"No match elements found. Body text sample: {body_text}")
-            print("No match elements found.")
+            # Fallback: get a chunk of page text for debugging
+            body_text = page.inner_text("body")[:600]
+            debug_info.append(f"No match elements found. Body snippet: {body_text}")
+            # Also try to get all text nodes that look like "vs"
+            vs_elements = page.query_selector_all("text=/.* vs .*/")
+            if vs_elements:
+                debug_info.append(f"Found {len(vs_elements)} elements containing 'vs'")
+                for e in vs_elements[:3]:
+                    debug_info.append(f"Sample vs element: {e.inner_text()[:100]}")
         else:
-            debug_info.append(f"Found {len(match_elements)} elements using selector '{used_selector}'")
-            # Try to extract first element's text for inspection
-            first_elem_text = match_elements[0].inner_text()[:200]
-            debug_info.append(f"First element text: {first_elem_text}")
+            debug_info.append(f"Found {len(match_elements)} elements using '{used_selector}'")
+            # Sample first element's full inner text
+            sample = match_elements[0].inner_text()[:300]
+            debug_info.append(f"Sample match text:\n{sample}")
+            # Attempt to extract odds and teams from the first element using regex
+            # (This will be refined after we see the real text)
 
-        # ... (rest of the matching logic kept as is, but we'll also print match count)
-        # For now, we skip the matching loop if no matches found
-        if match_elements:
-            # Placeholder for actual extraction – we'll implement proper parsing after seeing the structure
-            pass
-
+        # 5. (Placeholder) When selectors are confirmed, we'll loop through match_elements,
+        #    extract teams, kickoff time, 1X2 odds, match with Firestore, compute EV.
         browser.close()
 
-    # Send debug info to Telegram as a message so you can see it immediately
-    full_debug = "\n".join(debug_info) if debug_info else "No debug info collected"
-    send_telegram(f"🔍 Scraper Debug:\n{full_debug}")
+    send_telegram(f"🔍 Scraper Debug:\n" + "\n".join(debug_info))
     if alerts:
         send_telegram(f"🚀 +EV Betpawa Alerts:\n" + "\n\n".join(alerts[:10]))
     else:
