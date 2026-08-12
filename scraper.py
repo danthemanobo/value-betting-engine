@@ -16,10 +16,14 @@ MIN_EV = 0.05
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=15)
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    # Split long messages into chunks of 4000 chars
+    max_len = 4000
+    for i in range(0, len(text), max_len):
+        chunk = text[i:i+max_len]
+        try:
+            requests.post(url, json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "HTML"}, timeout=15)
+        except Exception as e:
+            print(f"Telegram error: {e}")
 
 def get_real_utc_now():
     try:
@@ -34,6 +38,7 @@ def normalize(name):
     return re.sub(r'\s+', ' ', name.replace('-', ' ').strip())
 
 def parse_odds_from_page(page):
+    """Extract 1X2 odds from a Betpawa match page."""
     odds = {"home": None, "draw": None, "away": None}
     try:
         price_elements = page.query_selector_all("span[class*='price'], span[class*='odd'], button[class*='price']")
@@ -70,8 +75,7 @@ def main():
     now_utc = get_real_utc_now()
     window_end = now_utc + timedelta(minutes=90)
     alerts = []
-    matched_count = 0
-    failed_count = 0
+    debug_lines = []  # per-match details
 
     fs_matches = db.collection("matches").where("kickoff", ">=", now_utc.isoformat()).where("kickoff", "<", window_end.isoformat()).stream()
     matches_list = []
@@ -97,7 +101,7 @@ def main():
             home_norm = normalize(home_raw)
             away_norm = normalize(away_raw)
 
-            # Every iteration: click search icon, then get fresh input
+            # Fresh search icon click
             search_icon = page.query_selector("button[aria-label*='search' i]")
             if search_icon:
                 search_icon.click()
@@ -105,11 +109,9 @@ def main():
 
             search_input = page.query_selector('input[type="search"], input[type="text"], input:not([type])')
             if not search_input:
-                send_telegram("❌ Search input not found. Aborting.")
-                browser.close()
-                return
+                debug_lines.append(f"❌ Search input missing for {home_raw} vs {away_raw}")
+                continue
 
-            # Clear, type, and submit search
             search_input.click()
             search_input.fill("")
             page.wait_for_timeout(300)
@@ -135,40 +137,46 @@ def main():
                             page.goto(full_url, timeout=30000, wait_until="networkidle")
                             page.wait_for_timeout(5000)
                             odds = parse_odds_from_page(page)
+                            true_probs = match.get("true_probs_1x2")
+
+                            # Build debug line
                             if odds["home"] and odds["draw"] and odds["away"]:
-                                true_probs = match.get("true_probs_1x2")
+                                debug_line = f"✅ {home_raw} vs {away_raw} | URL: {full_url}\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
                                 if true_probs:
                                     ev_home = (true_probs["home"] * odds["home"]) - 1
                                     ev_draw = (true_probs["draw"] * odds["draw"]) - 1
                                     ev_away = (true_probs["away"] * odds["away"]) - 1
-                                    match_name = f"{home_raw} vs {away_raw}"
+                                    debug_line += f"\nTP: {true_probs['home']:.2f}/{true_probs['draw']:.2f}/{true_probs['away']:.2f}\nEV%: {ev_home*100:.1f}/{ev_draw*100:.1f}/{ev_away*100:.1f}"
                                     if ev_home > MIN_EV:
-                                        alerts.append(f"⚽ {match_name}\n1X2 Home @ {odds['home']} (EV +{ev_home*100:.1f}%)\nBetpawa")
+                                        alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Home @ {odds['home']} (EV +{ev_home*100:.1f}%)\nBetpawa")
                                     if ev_draw > MIN_EV:
-                                        alerts.append(f"⚽ {match_name}\n1X2 Draw @ {odds['draw']} (EV +{ev_draw*100:.1f}%)\nBetpawa")
+                                        alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Draw @ {odds['draw']} (EV +{ev_draw*100:.1f}%)\nBetpawa")
                                     if ev_away > MIN_EV:
-                                        alerts.append(f"⚽ {match_name}\n1X2 Away @ {odds['away']} (EV +{ev_away*100:.1f}%)\nBetpawa")
-                                    matched_count += 1
+                                        alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Away @ {odds['away']} (EV +{ev_away*100:.1f}%)\nBetpawa")
+                                else:
+                                    debug_line += "\n⚠️ Missing true_probs_1x2"
+                                debug_lines.append(debug_line)
                             else:
-                                failed_count += 1
-                                body_snippet = page.inner_text("body")[:500]
-                                print(f"Odds extraction failed for {home_raw} vs {away_raw}. Snippet: {body_snippet}")
+                                debug_line = f"⚠️ {home_raw} vs {away_raw}\nOdds extraction failed\nPage snippet: {page.inner_text('body')[:200]}"
+                                debug_lines.append(debug_line)
 
                             # Return to events page
                             page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
                             page.wait_for_timeout(2000)
                             break
+
             if not found_match:
-                failed_count += 1
-                print(f"Match not found on Betpawa: {home_raw} vs {away_raw}")
+                debug_lines.append(f"❌ Not found: {home_raw} vs {away_raw}")
 
         browser.close()
 
-    report = f"🔍 Betpawa search-based scraper:\n- Matches processed: {len(matches_list)}\n- Successfully compared: {matched_count}\n- Failures: {failed_count}"
+    # Compose final report
+    report = f"🔍 Betpawa search-based scraper:\n- Matches processed: {len(matches_list)}\n"
     if alerts:
-        report += f"\n\n🚀 +EV Alerts ({len(alerts)}):\n" + "\n".join(alerts[:10])
+        report += f"\n🚀 +EV Alerts ({len(alerts)}):\n" + "\n".join(alerts[:10])
     else:
         report += "\nℹ️ No +EV bets found."
+    report += "\n\n📋 Detailed Debug:\n" + "\n\n".join(debug_lines[:5])  # limit to 5 entries
     send_telegram(report)
 
 if __name__ == "__main__":
