@@ -12,9 +12,9 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install -r requirements.txt
-      - name: Test Odds API
+      - run: python -m playwright install --with-deps chromium
+      - name: Capture Betpawa network API
         env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python test_api.py
+        run: python betpawa_network_debug.py
