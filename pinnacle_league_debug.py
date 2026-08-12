@@ -4,12 +4,17 @@ from playwright.sync_api import sync_playwright
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
-def send_telegram(text):
+def send_telegram_plain(text):
+    """Send plain text message, splitting if too long."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=15)
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    max_len = 4000
+    for i in range(0, len(text), max_len):
+        chunk = text[i:i+max_len]
+        try:
+            resp = requests.post(url, json={"chat_id": CHAT_ID, "text": chunk}, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"Telegram error on chunk {i//max_len}: {e}")
 
 def main():
     debug_info = []
@@ -39,7 +44,7 @@ def main():
 
         if not links:
             debug_info.append("No real league links found.")
-            send_telegram(f"🔍 Pinnacle League Debug:\n" + "\n".join(debug_info))
+            send_telegram_plain("🔍 Pinnacle League Debug:\n" + "\n".join(debug_info))
             browser.close()
             return
 
@@ -59,17 +64,17 @@ def main():
         debug_info.append(f"Found {len(match_elements)} match elements.")
 
         if match_elements:
-            # Get outerHTML of the first match element
+            # Get outerHTML of first match, truncate to reasonable size
             first_html = match_elements[0].evaluate("el => el.outerHTML")
-            # Truncate to avoid Telegram limit
-            debug_info.append(f"First match outerHTML (truncated):\n{first_html[:3000]}")
+            debug_info.append(f"First match outerHTML (truncated):\n{first_html[:2500]}")
         else:
             body_text = page.inner_text("body")[:1000]
-            debug_info.append(f"No match elements found. Body snippet:\n{body_text}")
+            debug_info.append(f"No match elements. Body snippet:\n{body_text}")
 
         browser.close()
 
-    send_telegram(f"🔍 Pinnacle League Debug:\n" + "\n\n".join(debug_info)[:4000])
+    full_message = "🔍 Pinnacle League Debug:\n" + "\n\n".join(debug_info)
+    send_telegram_plain(full_message[:10000])  # Split automatically
     print("Debug sent.")
 
 if __name__ == "__main__":
