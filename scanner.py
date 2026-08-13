@@ -83,26 +83,93 @@ def parse_market_key(key):
         return key
 
 def label_prices_for_market(market, home_name, away_name):
+    """
+    Use designation/participant ID to correctly label selections.
+    Falls back to order if designation is missing.
+    """
     prices = market.get("prices", [])
     market_type = market.get("type", "")
+    key = market.get("key", "")
+
+    has_designation = any('designation' in p for p in prices)
+
     if market_type == "moneyline":
-        if len(prices) == 3:
-            return [(home_name, american_to_decimal(prices[0]["price"])),
-                    ("Draw", american_to_decimal(prices[1]["price"])),
-                    (away_name, american_to_decimal(prices[2]["price"]))]
-        elif len(prices) == 2:
-            return [(home_name, american_to_decimal(prices[0]["price"])),
-                    (away_name, american_to_decimal(prices[1]["price"]))]
+        if has_designation:
+            labels = []
+            for p in prices:
+                des = p.get("designation", "").lower()
+                odds = american_to_decimal(p["price"])
+                if des == "home":
+                    labels.append((home_name, odds))
+                elif des == "draw":
+                    labels.append(("Draw", odds))
+                elif des == "away":
+                    labels.append((away_name, odds))
+                else:
+                    labels.append((f"sel_{len(labels)+1}", odds))
+            ordered = []
+            for desired in [home_name, "Draw", away_name]:
+                for label, odds in labels:
+                    if label == desired:
+                        ordered.append((label, odds))
+                        break
+            if len(ordered) == 3:
+                return ordered
+            else:
+                return labels
+        else:
+            if len(prices) == 3:
+                return [(home_name, american_to_decimal(prices[0]["price"])),
+                        ("Draw", american_to_decimal(prices[1]["price"])),
+                        (away_name, american_to_decimal(prices[2]["price"]))]
+            elif len(prices) == 2:
+                return [(home_name, american_to_decimal(prices[0]["price"])),
+                        (away_name, american_to_decimal(prices[1]["price"]))]
     elif market_type in ("total", "team_total"):
-        if len(prices) == 2:
-            return [("Over", american_to_decimal(prices[0]["price"])),
-                    ("Under", american_to_decimal(prices[1]["price"]))]
+        if has_designation:
+            labels = []
+            for p in prices:
+                des = p.get("designation", "").lower()
+                odds = american_to_decimal(p["price"])
+                if des == "over":
+                    labels.append(("Over", odds))
+                elif des == "under":
+                    labels.append(("Under", odds))
+                else:
+                    labels.append((f"sel_{len(labels)+1}", odds))
+            ordered = []
+            for desired in ["Over", "Under"]:
+                for label, odds in labels:
+                    if label == desired:
+                        ordered.append((label, odds))
+                        break
+            if len(ordered) == 2:
+                return ordered
+            return labels
+        else:
+            if len(prices) == 2:
+                return [("Over", american_to_decimal(prices[0]["price"])),
+                        ("Under", american_to_decimal(prices[1]["price"]))]
     elif market_type == "spread":
-        if len(prices) == 2:
-            home_point = prices[0].get("points", "")
-            away_point = prices[1].get("points", "")
-            return [(f"{home_name} {home_point}", american_to_decimal(prices[0]["price"])),
-                    (f"{away_name} {away_point}", american_to_decimal(prices[1]["price"]))]
+        if has_designation:
+            labels = []
+            for p in prices:
+                des = p.get("designation", "").lower()
+                points = p.get("points", "")
+                odds = american_to_decimal(p["price"])
+                if des == "home":
+                    labels.append((f"{home_name} {points}", odds))
+                elif des == "away":
+                    labels.append((f"{away_name} {points}", odds))
+                else:
+                    labels.append((f"{points}", odds))
+            return labels
+        else:
+            if len(prices) == 2:
+                home_point = prices[0].get("points", "")
+                away_point = prices[1].get("points", "")
+                return [(f"{home_name} {home_point}", american_to_decimal(prices[0]["price"])),
+                        (f"{away_name} {away_point}", american_to_decimal(prices[1]["price"]))]
     return []
 
 def get_top_league_ids():
@@ -125,7 +192,6 @@ def get_top_league_ids():
     return ids
 
 def process_match(match, headers, now_utc):
-    """Fetch and store all straight markets for a single match."""
     matchup_id = match["id"]
     home_name = None
     away_name = None
@@ -221,7 +287,6 @@ def main():
             print(f"Error fetching matchups for league {league_id}: {e}")
             continue
 
-        # Filter
         if TEST_MODE:
             selected_matches = [m for m in matchups if m.get("type") == "matchup"][:3]
         else:
