@@ -1,4 +1,4 @@
-import os, json, re, requests, unicodedata
+import os, json, re, requests
 from datetime import datetime, timedelta, timezone
 from playwright.sync_api import sync_playwright
 from firebase_admin import credentials, firestore, initialize_app
@@ -32,11 +32,30 @@ def get_real_utc_now():
         pass
     return datetime.now(timezone.utc)
 
-def strip_accents(s):
-    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-
-def normalize(name):
-    return re.sub(r'\s+', ' ', strip_accents(name).replace('-', ' ')).strip().lower()
+def parse_betpawa_time(text):
+    """Extract datetime from Betpawa result text like '5:15 pm Thu 13/08'."""
+    # Try to find time and date pattern
+    match = re.search(r'(\d{1,2}):(\d{2})\s*([ap]m)\s*\w{3}\s*(\d{2}/\d{2})', text, re.IGNORECASE)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    ampm = match.group(3).lower()
+    day_month = match.group(4)  # format '13/08'
+    if ampm == 'pm' and hour != 12:
+        hour += 12
+    elif ampm == 'am' and hour == 12:
+        hour = 0
+    now = get_real_utc_now()
+    # Use current year (Betpawa shows current/future matches, but year not shown)
+    day, month = map(int, day_month.split('/'))
+    # Build datetime in UTC, assuming Betpawa time is West Africa Time (UTC+1)
+    dt_wat = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    # Override day/month
+    dt_wat = dt_wat.replace(day=day, month=month)
+    # Convert to UTC
+    dt_utc = dt_wat - timedelta(hours=1)
+    return dt_utc.replace(tzinfo=timezone.utc)
 
 def parse_odds_from_page(page):
     odds = {"home": None, "draw": None, "away": None}
@@ -82,6 +101,12 @@ def main():
     for doc in fs_matches:
         data = doc.to_dict()
         data["doc_id"] = doc.id
+        # Parse Pinnacle kickoff to UTC
+        try:
+            kickoff_utc = datetime.fromisoformat(data["kickoff"].replace("Z", "+00:00"))
+            data["kickoff_utc"] = kickoff_utc
+        except:
+            data["kickoff_utc"] = None
         matches_list.append(data)
 
     if not matches_list:
@@ -95,14 +120,20 @@ def main():
         for match in matches_list:
             home_raw = match.get("home", "")
             away_raw = match.get("away", "")
-            home_norm = normalize(home_raw)
-            away_norm = normalize(away_raw)
+            pinnacle_kickoff = match.get("kickoff_utc")
             debug_line = ""
 
+            if not pinnacle_kickoff:
+                debug_line = f"❌ Invalid Pinnacle kickoff for {home_raw} vs {away_raw}"
+                debug_lines.append(debug_line)
+                continue
+
             try:
+                # Go to Betpawa events page
                 page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
                 page.wait_for_timeout(3000)
 
+                # Click search icon
                 search_icon = page.query_selector("button[aria-label*='search' i]")
                 if search_icon:
                     search_icon.click()
@@ -114,10 +145,11 @@ def main():
                     debug_lines.append(debug_line)
                     continue
 
+                # Search using home team name (will bring up multiple results, we'll filter by time)
                 search_input.click()
                 search_input.fill("")
                 page.wait_for_timeout(200)
-                search_input.fill(home_raw)  # use original home name (search handles accents)
+                search_input.fill(home_raw)
                 page.wait_for_timeout(500)
                 search_input.press("Enter")
                 page.wait_for_timeout(4000)
@@ -126,11 +158,13 @@ def main():
                 clicked = False
                 for elem in result_elements:
                     text = elem.inner_text()
-                    text_norm = strip_accents(text).lower()
-                    if 'efootball' in text_norm or 'simulated' in text_norm or 'esoccer' in text_norm:
+                    if 'eFootball' in text or 'Simulated' in text or 'Esoccer' in text:
                         continue
-                    # Direct substring check for home team (already lowercased)
-                    if home_norm in text_norm:
+                    bet_time = parse_betpawa_time(text)
+                    if not bet_time:
+                        continue
+                    # Compare times (within 5 minutes)
+                    if abs((bet_time - pinnacle_kickoff).total_seconds()) <= 300:
                         anchor = elem.query_selector("a")
                         if anchor:
                             href = anchor.get_attribute("href")
@@ -158,18 +192,20 @@ def main():
                                 clicked = True
                                 break
                 if not clicked:
-                    sample = []
-                    for e in result_elements[:2]:
-                        sample.append(e.inner_text()[:150])
-                    sample_text = "\n".join(sample) if sample else "No results"
-                    debug_line = f"❌ No match clicked for {home_raw} vs {away_raw}\nSample results:\n{sample_text}"
+                    # Show sample times for diagnosis
+                    sample_times = []
+                    for e in result_elements[:3]:
+                        t = parse_betpawa_time(e.inner_text())
+                        sample_times.append(f"{e.inner_text()[:80]} -> {t}")
+                    sample_text = "\n".join(sample_times) if sample_times else "No times parsed"
+                    debug_line = f"❌ No match by time for {home_raw} vs {away_raw}\nPinnacle kickoff: {pinnacle_kickoff}\nSample results:\n{sample_text}"
             except Exception as e:
                 debug_line = f"⚠️ Exception for {home_raw} vs {away_raw}: {e}"
             debug_lines.append(debug_line)
 
         browser.close()
 
-    report = f"🔍 Betpawa search-based scraper:\n- Matches processed: {len(matches_list)}\n"
+    report = f"🔍 Betpawa time-based scraper:\n- Matches processed: {len(matches_list)}\n"
     if alerts:
         report += f"\n🚀 +EV Alerts ({len(alerts)}):\n" + "\n".join(alerts[:10])
     else:
