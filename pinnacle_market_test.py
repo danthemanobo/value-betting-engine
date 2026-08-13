@@ -52,15 +52,19 @@ def main():
     away_name = None
     participant_map = {}  # id -> name and alignment
 
-    for p in target_match["participants"]:
-        participant_map[p["id"]] = {
-            "name": p["name"],
-            "alignment": p.get("alignment")
-        }
+    # Build participant map safely
+    for p in target_match.get("participants", []):
+        pid = p.get("id")
+        if pid is not None:
+            participant_map[pid] = {
+                "name": p.get("name", f"ID {pid}"),
+                "alignment": p.get("alignment")
+            }
+        # Determine home/away by alignment
         if p.get("alignment") == "home":
-            home_name = p["name"]
+            home_name = p.get("name")
         elif p.get("alignment") == "away":
-            away_name = p["name"]
+            away_name = p.get("name")
 
     start_time = target_match.get("startTime", "Unknown")
     print(f"Selected match: {home_name} vs {away_name} (ID {matchup_id})")
@@ -110,7 +114,7 @@ def main():
         lines.append(line)
 
     full_msg = "\n".join(lines)
-    send_telegram_plain(full_msg[:12000])  # split automatically if >4000
+    send_telegram_plain(full_msg[:12000])
 
 if __name__ == "__main__":
     main()
