@@ -38,35 +38,24 @@ def strip_accents(s):
 def normalize(name):
     return re.sub(r'\s+', ' ', strip_accents(name).replace('-', ' ')).strip().lower()
 
-def parse_odds_from_page(page):
+def parse_1x2_odds(page):
+    """Extract 1X2 Full Time odds by locating the heading and grabbing next three numbers."""
     odds = {"home": None, "draw": None, "away": None}
     try:
-        price_elements = page.query_selector_all("span[class*='price'], span[class*='odd'], button[class*='price']")
-        if not price_elements:
-            numbers = page.evaluate("""() => {
-                const res = [];
-                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-                while (walker.nextNode()) {
-                    const t = walker.currentNode.textContent.trim();
-                    if (/^\\d+\\.\\d{2}$/.test(t)) res.push(t);
-                }
-                return res;
-            }""")
-            numbers = [float(x) for x in numbers if float(x) > 1.0]
-            if len(numbers) >= 3:
-                odds = {"home": numbers[0], "draw": numbers[1], "away": numbers[2]}
-        else:
-            prices = []
-            for el in price_elements:
-                txt = el.inner_text().strip()
-                try:
-                    val = float(txt)
-                    if val > 1.0:
-                        prices.append(val)
-                except:
-                    continue
-            if len(prices) >= 3:
-                odds = {"home": prices[0], "draw": prices[1], "away": prices[2]}
+        body_text = page.inner_text("body")
+        lines = body_text.split('\n')
+        for i, line in enumerate(lines):
+            if "1X2 | Full Time" in line:
+                nums = []
+                j = i + 1
+                while j < len(lines) and len(nums) < 3:
+                    s = lines[j].strip()
+                    if re.match(r'^\d+\.\d+$', s):
+                        nums.append(float(s))
+                    j += 1
+                if len(nums) == 3:
+                    odds = {"home": nums[0], "draw": nums[1], "away": nums[2]}
+                    break
     except Exception as e:
         print(f"Odds extraction error: {e}")
     return odds
@@ -95,6 +84,8 @@ def main():
         for match in matches_list:
             home_raw = match.get("home", "")
             away_raw = match.get("away", "")
+            home_norm = normalize(home_raw)
+            away_norm = normalize(away_raw)
             debug_line = ""
 
             try:
@@ -127,17 +118,14 @@ def main():
                     continue
 
                 first_elem = result_elements[0]
-                # CLICK THE ELEMENT DIRECTLY (no anchor needed)
                 first_elem.click()
                 page.wait_for_timeout(5000)
 
-                # Capture current URL and page text
                 current_url = page.url
-                page_text = page.inner_text("body")[:500]
-                odds = parse_odds_from_page(page)
+                odds = parse_1x2_odds(page)
                 true_probs = match.get("true_probs_1x2")
 
-                debug_line = f"🔗 Clicked first result. URL: {current_url}\n📄 Page snippet:\n{page_text}\n\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
+                debug_line = f"🔗 URL: {current_url}\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
                 if true_probs:
                     ev_home = (true_probs["home"] * odds["home"]) - 1
                     ev_draw = (true_probs["draw"] * odds["draw"]) - 1
@@ -157,7 +145,7 @@ def main():
 
         browser.close()
 
-    report = f"🔍 Betpawa click-first scraper:\n- Matches processed: {len(matches_list)}\n"
+    report = f"🔍 Betpawa final:\n- Matches processed: {len(matches_list)}\n"
     if alerts:
         report += f"\n🚀 +EV Alerts ({len(alerts)}):\n" + "\n".join(alerts[:10])
     else:

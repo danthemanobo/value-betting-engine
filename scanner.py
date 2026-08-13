@@ -38,11 +38,10 @@ def de_vig_three_way(o1, o2, o3):
 def main():
     now_utc = get_real_utc_now()
     window_end = now_utc + timedelta(minutes=90)
-    print(f"Scanning from {now_utc.isoformat()} to {window_end.isoformat()}")
 
     params = {
         "apiKey": API_KEY,
-        "regions": "eu",   # Pinnacle
+        "regions": "eu",
         "markets": "h2h,totals",
         "oddsFormat": "decimal"
     }
@@ -52,12 +51,10 @@ def main():
         all_matches = resp.json()
     except Exception as e:
         send_telegram(f"❌ API error: {e}")
-        print(f"API error: {e}")
         return
 
-    print(f"Fetched {len(all_matches)} matches from API")
-
     stored_count = 0
+    missing_h2h_count = 0
     for match in all_matches:
         try:
             kickoff = datetime.fromisoformat(match["commence_time"].replace("Z", "+00:00"))
@@ -81,33 +78,55 @@ def main():
             "stored_at": now_utc.isoformat()
         }
 
+        has_h2h = False
         for market in pinnacle.get("markets", []):
             if market["key"] == "h2h":
                 outcomes = {o["name"]: o["price"] for o in market.get("outcomes", [])}
                 if len(outcomes) == 3:
                     try:
-                        tp_home, tp_draw, tp_away = de_vig_three_way(outcomes["Home"], outcomes["Draw"], outcomes["Away"])
-                        data["pinnacle_1x2"] = {"home": outcomes["Home"], "draw": outcomes["Draw"], "away": outcomes["Away"]}
-                        data["true_probs_1x2"] = {"home": tp_home, "draw": tp_draw, "away": tp_away}
-                    except:
-                        pass
+                        tp_home, tp_draw, tp_away = de_vig_three_way(
+                            outcomes["Home"], outcomes["Draw"], outcomes["Away"]
+                        )
+                        data["pinnacle_1x2"] = {
+                            "home": outcomes["Home"],
+                            "draw": outcomes["Draw"],
+                            "away": outcomes["Away"]
+                        }
+                        data["true_probs_1x2"] = {
+                            "home": tp_home,
+                            "draw": tp_draw,
+                            "away": tp_away
+                        }
+                        has_h2h = True
+                    except Exception as e:
+                        print(f"Error de-vigging h2h for {match['home_team']}: {e}")
+
             elif market["key"] == "totals":
                 outcomes = {o["name"]: o["price"] for o in market.get("outcomes", [])}
                 if "Over" in outcomes and "Under" in outcomes:
                     try:
                         tp_over, tp_under = de_vig_two_way(outcomes["Over"], outcomes["Under"])
-                        data["pinnacle_totals"] = {"over": outcomes["Over"], "under": outcomes["Under"]}
-                        data["true_probs_totals"] = {"over": tp_over, "under": tp_under}
-                    except:
-                        pass
+                        data["pinnacle_totals"] = {
+                            "over": outcomes["Over"],
+                            "under": outcomes["Under"]
+                        }
+                        data["true_probs_totals"] = {
+                            "over": tp_over,
+                            "under": tp_under
+                        }
+                    except Exception as e:
+                        print(f"Error de-vigging totals for {match['home_team']}: {e}")
 
-        if "true_probs_1x2" in data or "true_probs_totals" in data:
-            doc_id = f"{match['home_team']}-{match['away_team']}-{kickoff.strftime('%Y%m%d%H%M')}"
-            db.collection("matches").document(doc_id).set(data, merge=True)
-            stored_count += 1
+        if not has_h2h:
+            missing_h2h_count += 1
+            # Still store with a placeholder, so scraper can identify missing
+            data["true_probs_1x2"] = None
 
-    send_telegram(f"✅ Pinnacle scan done. Matches in window: {stored_count}")
-    print("Done")
+        doc_id = f"{match['home_team']}-{match['away_team']}-{kickoff.strftime('%Y%m%d%H%M')}"
+        db.collection("matches").document(doc_id).set(data, merge=True)
+        stored_count += 1
+
+    send_telegram(f"✅ Pinnacle scan done. Stored: {stored_count}. Missing h2h: {missing_h2h_count}")
 
 if __name__ == "__main__":
     main()
