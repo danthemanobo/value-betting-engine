@@ -95,8 +95,6 @@ def main():
         for match in matches_list:
             home_raw = match.get("home", "")
             away_raw = match.get("away", "")
-            home_norm = normalize(home_raw)
-            away_norm = normalize(away_raw)
             debug_line = ""
 
             try:
@@ -116,7 +114,7 @@ def main():
                     debug_lines.append(debug_line)
                     continue
 
-                # Search using home team name
+                # Type home team name and search
                 search_input.click()
                 search_input.fill("")
                 page.wait_for_timeout(200)
@@ -125,68 +123,56 @@ def main():
                 search_input.press("Enter")
                 page.wait_for_timeout(5000)
 
-                # Fresh query for results
+                # Get all result elements, click the very first one (no filters)
                 result_elements = page.query_selector_all("div[class*='event']")
-                clicked = False
-                for elem in result_elements:
-                    text = elem.inner_text()
-                    text_lower = strip_accents(text).lower()
-                    # Only football and contains home team
-                    if 'football' not in text_lower:
-                        continue
-                    if home_norm not in text_lower:
-                        continue
-                    # We found a likely football match with home team; click it
-                    anchor = elem.query_selector("a")
-                    if anchor:
-                        href = anchor.get_attribute("href")
-                        if href:
-                            full_url = "https://www.betpawa.ng" + href if href.startswith('/') else href
-                            page.goto(full_url, timeout=30000, wait_until="networkidle")
-                            page.wait_for_timeout(5000)
-                            # Verify away team appears on page
-                            page_text = strip_accents(page.inner_text("body")).lower()
-                            if away_norm not in page_text:
-                                # Wrong match, go back and try next result
-                                page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
-                                page.wait_for_timeout(2000)
-                                # Re-do search? We'll re-enter the loop but simpler: continue outer loop by re-doing search?
-                                # For simplicity, break inner loop and try next element not ideal. We'll just skip this result and continue scanning elements.
-                                # But we've navigated away; we need to re-search. This adds complexity.
-                                # Instead, we assume the first football result containing home team is correct and skip away verification for now.
-                                pass
-                            odds = parse_odds_from_page(page)
-                            true_probs = match.get("true_probs_1x2")
+                if not result_elements:
+                    debug_line = f"❌ No results for {home_raw} vs {away_raw}"
+                    debug_lines.append(debug_line)
+                    continue
 
-                            debug_line = f"✅ {home_raw} vs {away_raw}\nURL: {full_url}\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
-                            if true_probs:
-                                ev_home = (true_probs["home"] * odds["home"]) - 1
-                                ev_draw = (true_probs["draw"] * odds["draw"]) - 1
-                                ev_away = (true_probs["away"] * odds["away"]) - 1
-                                debug_line += f"\nTP: {true_probs['home']:.2f}/{true_probs['draw']:.2f}/{true_probs['away']:.2f}\nEV%: {ev_home*100:.1f}/{ev_draw*100:.1f}/{ev_away*100:.1f}"
-                                if ev_home > MIN_EV:
-                                    alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Home @ {odds['home']} (EV +{ev_home*100:.1f}%)\nBetpawa")
-                                if ev_draw > MIN_EV:
-                                    alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Draw @ {odds['draw']} (EV +{ev_draw*100:.1f}%)\nBetpawa")
-                                if ev_away > MIN_EV:
-                                    alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Away @ {odds['away']} (EV +{ev_away*100:.1f}%)\nBetpawa")
-                            else:
-                                debug_line += "\n⚠️ Missing true_probs_1x2"
-                            clicked = True
-                            break
-                if not clicked:
-                    sample = []
-                    for e in result_elements[:2]:
-                        sample.append(e.inner_text()[:150])
-                    sample_text = "\n".join(sample) if sample else "No results"
-                    debug_line = f"❌ No football match clicked for {home_raw} vs {away_raw}\nSample results:\n{sample_text}"
+                first_elem = result_elements[0]
+                anchor = first_elem.query_selector("a")
+                if not anchor:
+                    debug_line = f"❌ No anchor in first result for {home_raw} vs {away_raw}"
+                    debug_lines.append(debug_line)
+                    continue
+
+                href = anchor.get_attribute("href")
+                if not href:
+                    debug_line = f"❌ No href in first result for {home_raw} vs {away_raw}"
+                    debug_lines.append(debug_line)
+                    continue
+
+                full_url = "https://www.betpawa.ng" + href if href.startswith('/') else href
+                page.goto(full_url, timeout=30000, wait_until="networkidle")
+                page.wait_for_timeout(5000)
+
+                # Extract page text snippet for debug
+                page_text = page.inner_text("body")[:500]
+                odds = parse_odds_from_page(page)
+                true_probs = match.get("true_probs_1x2")
+
+                debug_line = f"🔗 Clicked URL: {full_url}\n📄 Page snippet:\n{page_text}\n\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
+                if true_probs:
+                    ev_home = (true_probs["home"] * odds["home"]) - 1
+                    ev_draw = (true_probs["draw"] * odds["draw"]) - 1
+                    ev_away = (true_probs["away"] * odds["away"]) - 1
+                    debug_line += f"\nTP: {true_probs['home']:.2f}/{true_probs['draw']:.2f}/{true_probs['away']:.2f}\nEV%: {ev_home*100:.1f}/{ev_draw*100:.1f}/{ev_away*100:.1f}"
+                    if ev_home > MIN_EV:
+                        alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Home @ {odds['home']} (EV +{ev_home*100:.1f}%)\nBetpawa")
+                    if ev_draw > MIN_EV:
+                        alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Draw @ {odds['draw']} (EV +{ev_draw*100:.1f}%)\nBetpawa")
+                    if ev_away > MIN_EV:
+                        alerts.append(f"⚽ {home_raw} vs {away_raw}\n1X2 Away @ {odds['away']} (EV +{ev_away*100:.1f}%)\nBetpawa")
+                else:
+                    debug_line += "\n⚠️ Missing true_probs_1x2"
             except Exception as e:
                 debug_line = f"⚠️ Exception for {home_raw} vs {away_raw}: {e}"
             debug_lines.append(debug_line)
 
         browser.close()
 
-    report = f"🔍 Betpawa football-filtered scraper:\n- Matches processed: {len(matches_list)}\n"
+    report = f"🔍 Betpawa no-filter scraper:\n- Matches processed: {len(matches_list)}\n"
     if alerts:
         report += f"\n🚀 +EV Alerts ({len(alerts)}):\n" + "\n".join(alerts[:10])
     else:
