@@ -14,32 +14,32 @@ def send_telegram_plain(text):
         except Exception as e:
             print(f"Telegram error: {e}")
 
-# Candidate endpoints to test
-endpoints = [
-    "https://guest.api.arcadia.pinnacle.com/0.1/sports",
-    "https://guest.api.arcadia.pinnacle.com/0.1/leagues",
-    "https://guest.api.arcadia.pinnacle.com/0.1/sports/soccer/leagues",
-    "https://guest.api.arcadia.pinnacle.com/0.1/soccer/leagues",
-    "https://guest.api.arcadia.pinnacle.com/0.1/leagues?sportId=29",
-]
+def main():
+    endpoints = [
+        "https://guest.api.arcadia.pinnacle.com/0.1/sports",
+        "https://guest.api.arcadia.pinnacle.com/0.1/leagues",
+        "https://guest.api.arcadia.pinnacle.com/0.1/sports/soccer/leagues",
+        "https://guest.api.arcadia.pinnacle.com/0.1/soccer/leagues",
+        "https://guest.api.arcadia.pinnacle.com/0.1/leagues?sportId=29",
+    ]
 
-headers = {
-    "x-api-key": API_KEY,
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+    headers = {
+        "x-api-key": API_KEY,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
 
-results = []
-for url in endpoints:
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        status = resp.status_code
-        snippet = resp.text[:500]
-        results.append(f"URL: {url}\nStatus: {status}\nSnippet: {snippet}\n---")
-    except Exception as e:
-        results.append(f"URL: {url}\nError: {e}\n---")
+    results = []
+    for url in endpoints:
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            status = resp.status_code
+            snippet = resp.text[:500]
+            results.append(f"URL: {url}\nStatus: {status}\nSnippet: {snippet}\n---")
+        except Exception as e:
+            results.append(f"URL: {url}\nError: {e}\n---")
 
-full_msg = "🔍 Pinnacle Endpoint Probe:\n\n" + "\n".join(results)
-send_telegram_plain(full_msg[:12000])
+    full_msg = "🔍 Pinnacle Endpoint Probe:\n\n" + "\n".join(results)
+    send_telegram_plain(full_msg[:12000])
 
 if __name__ == "__main__":
     main()
