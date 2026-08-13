@@ -6,6 +6,7 @@ PINNACLE_API_KEY = os.environ['PINNACLE_API_KEY']
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 FIREBASE_SERVICE_ACCOUNT = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT'])
+TEST_MODE = os.environ.get('TEST_MODE', 'false').lower() == 'true'
 
 cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT)
 initialize_app(cred)
@@ -123,6 +124,77 @@ def get_top_league_ids():
             ids.append(league["id"])
     return ids
 
+def process_match(match, headers, now_utc):
+    """Fetch and store all straight markets for a single match."""
+    matchup_id = match["id"]
+    home_name = None
+    away_name = None
+    for p in match.get("participants", []):
+        if p.get("alignment") == "home":
+            home_name = p.get("name")
+        elif p.get("alignment") == "away":
+            away_name = p.get("name")
+    if not home_name or not away_name:
+        return 0
+
+    markets_url = f"https://guest.api.arcadia.pinnacle.com/0.1/matchups/{matchup_id}/markets/straight"
+    try:
+        resp = requests.get(markets_url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        match_markets = resp.json()
+    except Exception as e:
+        print(f"Error fetching markets for {home_name} vs {away_name}: {e}")
+        return 0
+
+    markets_data = []
+    for market in match_markets:
+        key = market.get("key", "")
+        market_name = parse_market_key(key)
+        labels = label_prices_for_market(market, home_name, away_name)
+        if not labels:
+            continue
+
+        decimal_odds = [odds for _, odds in labels]
+        true_probs = None
+        if len(decimal_odds) == 3:
+            tp_home, tp_draw, tp_away = de_vig_three_way(*decimal_odds)
+            true_probs = [tp_home, tp_draw, tp_away]
+        elif len(decimal_odds) == 2:
+            tp1, tp2 = de_vig_two_way(*decimal_odds)
+            true_probs = [tp1, tp2]
+        else:
+            continue
+
+        selections = []
+        for (sel_name, odds), tp in zip(labels, true_probs):
+            selections.append({
+                "name": sel_name,
+                "decimal": odds,
+                "true_prob": tp
+            })
+
+        markets_data.append({
+            "key": key,
+            "market_name": market_name,
+            "type": market.get("type", ""),
+            "period": market.get("period", 0),
+            "selections": selections
+        })
+
+    if not markets_data:
+        return 0
+
+    doc_id = f"{home_name}-{away_name}-{match['startTime'].replace(':','-')}"
+    db.collection("matches").document(doc_id).set({
+        "home": home_name,
+        "away": away_name,
+        "kickoff": match["startTime"],
+        "markets": markets_data,
+        "stored_at": now_utc.isoformat()
+    }, merge=True)
+
+    return len(markets_data)
+
 def main():
     now_utc = datetime.now(timezone.utc)
     window_end = now_utc + timedelta(minutes=90)
@@ -140,7 +212,6 @@ def main():
     stored_market_count = 0
 
     for league_id in league_ids:
-        # Fetch matchups
         matchups_url = f"https://guest.api.arcadia.pinnacle.com/0.1/leagues/{league_id}/matchups"
         try:
             resp = requests.get(matchups_url, headers=headers, timeout=20)
@@ -150,98 +221,32 @@ def main():
             print(f"Error fetching matchups for league {league_id}: {e}")
             continue
 
-        # Filter matches in window and type='matchup'
-        window_matches = []
-        for m in matchups:
-            if m.get("type") != "matchup":
-                continue
-            start_str = m.get("startTime")
-            if not start_str:
-                continue
-            try:
-                start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-            except:
-                continue
-            if now_utc <= start_dt < window_end:
-                window_matches.append(m)
-
-        if not window_matches:
-            continue
-
-        # For each match, fetch its direct straight markets
-        for match in window_matches:
-            matchup_id = match["id"]
-            home_name = None
-            away_name = None
-            for p in match.get("participants", []):
-                if p.get("alignment") == "home":
-                    home_name = p.get("name")
-                elif p.get("alignment") == "away":
-                    away_name = p.get("name")
-            if not home_name or not away_name:
-                continue
-
-            markets_url = f"https://guest.api.arcadia.pinnacle.com/0.1/matchups/{matchup_id}/markets/straight"
-            try:
-                resp = requests.get(markets_url, headers=headers, timeout=20)
-                resp.raise_for_status()
-                match_markets = resp.json()
-            except Exception as e:
-                print(f"Error fetching markets for {home_name} vs {away_name}: {e}")
-                continue
-
-            markets_data = []
-            for market in match_markets:
-                key = market.get("key", "")
-                market_name = parse_market_key(key)
-                labels = label_prices_for_market(market, home_name, away_name)
-                if not labels:
+        # Filter
+        if TEST_MODE:
+            selected_matches = [m for m in matchups if m.get("type") == "matchup"][:3]
+        else:
+            selected_matches = []
+            for m in matchups:
+                if m.get("type") != "matchup":
                     continue
-
-                decimal_odds = [odds for _, odds in labels]
-                true_probs = None
-                if len(decimal_odds) == 3:
-                    tp_home, tp_draw, tp_away = de_vig_three_way(*decimal_odds)
-                    true_probs = [tp_home, tp_draw, tp_away]
-                elif len(decimal_odds) == 2:
-                    tp1, tp2 = de_vig_two_way(*decimal_odds)
-                    true_probs = [tp1, tp2]
-                else:
+                start_str = m.get("startTime")
+                if not start_str:
                     continue
+                try:
+                    start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                except:
+                    continue
+                if now_utc <= start_dt < window_end:
+                    selected_matches.append(m)
 
-                selections = []
-                for (sel_name, odds), tp in zip(labels, true_probs):
-                    selections.append({
-                        "name": sel_name,
-                        "decimal": odds,
-                        "true_prob": tp
-                    })
-
-                markets_data.append({
-                    "key": key,
-                    "market_name": market_name,
-                    "type": market.get("type", ""),
-                    "period": market.get("period", 0),
-                    "selections": selections
-                })
-
-            if not markets_data:
-                continue
-
-            doc_id = f"{home_name}-{away_name}-{match['startTime'].replace(':','-')}"
-            db.collection("matches").document(doc_id).set({
-                "home": home_name,
-                "away": away_name,
-                "kickoff": match["startTime"],
-                "markets": markets_data,
-                "stored_at": now_utc.isoformat()
-            }, merge=True)
-
-            stored_match_count += 1
-            stored_market_count += len(markets_data)
+        for match in selected_matches:
+            count = process_match(match, headers, now_utc)
+            if count > 0:
+                stored_match_count += 1
+                stored_market_count += count
 
     send_telegram(
-        f"✅ Pinnacle scan done.\nMatches stored: {stored_match_count}\nTotal markets stored: {stored_market_count}"
+        f"✅ Pinnacle scan done.\nMode: {'TEST' if TEST_MODE else 'LIVE'}\nMatches stored: {stored_match_count}\nTotal markets stored: {stored_market_count}"
     )
     print(f"Pinnacle scan complete. Matches: {stored_match_count}, Markets: {stored_market_count}")
 
