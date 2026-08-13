@@ -98,11 +98,9 @@ def main():
             debug_line = ""
 
             try:
-                # Go to events page fresh
                 page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
                 page.wait_for_timeout(3000)
 
-                # Click search icon
                 search_icon = page.query_selector("button[aria-label*='search' i]")
                 if search_icon:
                     search_icon.click()
@@ -114,7 +112,6 @@ def main():
                     debug_lines.append(debug_line)
                     continue
 
-                # Type home team name and search
                 search_input.click()
                 search_input.fill("")
                 page.wait_for_timeout(200)
@@ -123,7 +120,6 @@ def main():
                 search_input.press("Enter")
                 page.wait_for_timeout(5000)
 
-                # Get all result elements, click the very first one (no filters)
                 result_elements = page.query_selector_all("div[class*='event']")
                 if not result_elements:
                     debug_line = f"❌ No results for {home_raw} vs {away_raw}"
@@ -131,28 +127,17 @@ def main():
                     continue
 
                 first_elem = result_elements[0]
-                anchor = first_elem.query_selector("a")
-                if not anchor:
-                    debug_line = f"❌ No anchor in first result for {home_raw} vs {away_raw}"
-                    debug_lines.append(debug_line)
-                    continue
-
-                href = anchor.get_attribute("href")
-                if not href:
-                    debug_line = f"❌ No href in first result for {home_raw} vs {away_raw}"
-                    debug_lines.append(debug_line)
-                    continue
-
-                full_url = "https://www.betpawa.ng" + href if href.startswith('/') else href
-                page.goto(full_url, timeout=30000, wait_until="networkidle")
+                # CLICK THE ELEMENT DIRECTLY (no anchor needed)
+                first_elem.click()
                 page.wait_for_timeout(5000)
 
-                # Extract page text snippet for debug
+                # Capture current URL and page text
+                current_url = page.url
                 page_text = page.inner_text("body")[:500]
                 odds = parse_odds_from_page(page)
                 true_probs = match.get("true_probs_1x2")
 
-                debug_line = f"🔗 Clicked URL: {full_url}\n📄 Page snippet:\n{page_text}\n\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
+                debug_line = f"🔗 Clicked first result. URL: {current_url}\n📄 Page snippet:\n{page_text}\n\nOdds: {odds['home']}/{odds['draw']}/{odds['away']}"
                 if true_probs:
                     ev_home = (true_probs["home"] * odds["home"]) - 1
                     ev_draw = (true_probs["draw"] * odds["draw"]) - 1
@@ -172,7 +157,7 @@ def main():
 
         browser.close()
 
-    report = f"🔍 Betpawa no-filter scraper:\n- Matches processed: {len(matches_list)}\n"
+    report = f"🔍 Betpawa click-first scraper:\n- Matches processed: {len(matches_list)}\n"
     if alerts:
         report += f"\n🚀 +EV Alerts ({len(alerts)}):\n" + "\n".join(alerts[:10])
     else:
