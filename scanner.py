@@ -83,10 +83,6 @@ def parse_market_key(key):
         return key
 
 def label_prices_for_market(market, home_name, away_name):
-    """
-    Use designation/participant ID to correctly label selections.
-    Falls back to order if designation is missing.
-    """
     prices = market.get("prices", [])
     market_type = market.get("type", "")
     key = market.get("key", "")
