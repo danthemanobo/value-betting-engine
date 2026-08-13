@@ -12,9 +12,9 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install -r requirements.txt
-      - name: Test Pinnacle markets for one match
+      - name: Test Pinnacle market names
         env:
           PINNACLE_API_KEY: ${{ secrets.PINNACLE_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python pinnacle_market_test.py
+        run: python pinnacle_market_names_test.py
