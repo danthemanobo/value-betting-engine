@@ -13,6 +13,14 @@ jobs:
           python-version: '3.10'
       - run: pip install -r requirements.txt
       - run: python -m playwright install --with-deps chromium
+      - name: Run Pinnacle scanner (TEST MODE)
+        env:
+          PINNACLE_API_KEY: ${{ secrets.PINNACLE_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          TEST_MODE: 'true'
+        run: python scanner.py
       - name: Run advanced Betpawa scraper
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
