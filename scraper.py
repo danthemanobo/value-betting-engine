@@ -1,7 +1,6 @@
 import os, json, re, requests, unicodedata
 from datetime import datetime, timedelta, timezone
 from playwright.sync_api import sync_playwright
-from fuzzywuzzy import fuzz
 from firebase_admin import credentials, firestore, initialize_app
 
 FIREBASE_SERVICE_ACCOUNT = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT'])
@@ -37,7 +36,7 @@ def strip_accents(s):
     return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
 def normalize(name):
-    return re.sub(r'\s+', ' ', strip_accents(name).replace('-', ' ')).strip()
+    return re.sub(r'\s+', ' ', strip_accents(name).replace('-', ' ')).strip().lower()
 
 def parse_odds_from_page(page):
     odds = {"home": None, "draw": None, "away": None}
@@ -101,11 +100,9 @@ def main():
             debug_line = ""
 
             try:
-                # Always go to events page fresh
                 page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
                 page.wait_for_timeout(3000)
 
-                # Click search icon
                 search_icon = page.query_selector("button[aria-label*='search' i]")
                 if search_icon:
                     search_icon.click()
@@ -117,24 +114,23 @@ def main():
                     debug_lines.append(debug_line)
                     continue
 
-                # Type home team name and search
                 search_input.click()
                 search_input.fill("")
                 page.wait_for_timeout(200)
-                search_input.fill(home_norm)
+                search_input.fill(home_raw)  # use original home name (search handles accents)
                 page.wait_for_timeout(500)
                 search_input.press("Enter")
                 page.wait_for_timeout(4000)
 
-                # Collect results and click the first valid match
                 result_elements = page.query_selector_all("div[class*='event']")
                 clicked = False
                 for elem in result_elements:
                     text = elem.inner_text()
-                    if 'eFootball' in text or 'Simulated' in text or 'Esoccer' in text:
+                    text_norm = strip_accents(text).lower()
+                    if 'efootball' in text_norm or 'simulated' in text_norm or 'esoccer' in text_norm:
                         continue
-                    # Only need home team to match
-                    if fuzz.partial_ratio(home_norm, strip_accents(text)) > 60:
+                    # Direct substring check for home team (already lowercased)
+                    if home_norm in text_norm:
                         anchor = elem.query_selector("a")
                         if anchor:
                             href = anchor.get_attribute("href")
