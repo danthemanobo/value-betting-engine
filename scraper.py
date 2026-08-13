@@ -1,7 +1,6 @@
 import os, json, re, requests, unicodedata
 from datetime import datetime, timedelta, timezone
 from playwright.sync_api import sync_playwright
-from fuzzywuzzy import fuzz
 from firebase_admin import credentials, firestore, initialize_app
 
 FIREBASE_SERVICE_ACCOUNT = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT'])
@@ -30,8 +29,8 @@ def strip_accents(s):
 def normalize(name):
     return re.sub(r'\s+', ' ', strip_accents(name).replace('-', ' ')).strip().lower()
 
-# ---------- Pinnacle Key Parsing ----------
 def parse_pinnacle_key(key):
+    """Extract info from Pinnacle key."""
     parts = key.split(';')
     if len(parts) < 3:
         return None
@@ -44,16 +43,12 @@ def parse_pinnacle_key(key):
         info["type"] = "total"
         if len(parts) > 3:
             info["line"] = parts[3]
-    elif code == 's':
-        info["type"] = "spread"
-        if len(parts) > 3:
-            info["line"] = parts[3]
     elif code == 'tt':
         info["type"] = "team_total"
         if len(parts) > 3:
             info["line"] = parts[3]
         if len(parts) > 4:
-            info["side"] = parts[4]  # 'home' or 'away'
+            info["side"] = parts[4]
     else:
         return None
     return info
@@ -62,189 +57,67 @@ def canonical_key_from_pinnacle(info):
     period = info.get("period", "0")
     type_ = info.get("type")
     line = info.get("line")
-    side = info.get("side")
     if type_ == "1x2":
         return f"1x2_{period}"
     elif type_ == "total":
         return f"total_{period}_{line}"
     elif type_ == "team_total":
+        side = info.get("side")
         return f"team_total_{period}_{side}_{line}"
-    elif type_ == "spread":
-        return f"spread_{period}_{line}"
     return None
 
-# ---------- Betpawa Market Parsing ----------
-def parse_betpawa_page(body_text, home_name, away_name):
+def parse_focused_markets(body_text):
     """
-    Extract markets from Betpawa page.
-    Returns list of market dicts with canonical-type info.
+    Extract only 1X2 Full Time and Over/Under 2.5 Full Time.
+    Returns dict with keys '1x2' and 'ou_2_5', each containing selections list.
     """
     lines = [l.strip() for l in body_text.split('\n') if l.strip()]
-    markets = []
+    markets = {'1x2': None, 'ou_2_5': None}
+
     i = 0
     while i < len(lines):
         line = lines[i]
-        if '|' not in line:
+        if '1X2 | Full Time' in line:
+            # Next three lines should be label, odds, label, odds, label, odds
+            try:
+                if i+6 <= len(lines):
+                    home_label = lines[i+1]
+                    home_odd = float(lines[i+2])
+                    draw_label = lines[i+3]
+                    draw_odd = float(lines[i+4])
+                    away_label = lines[i+5]
+                    away_odd = float(lines[i+6])
+                    if home_label == '1' and draw_label == 'X' and away_label == '2':
+                        markets['1x2'] = [('home', home_odd), ('draw', draw_odd), ('away', away_odd)]
+            except:
+                pass
             i += 1
             continue
-        header = line
+
+        if 'Over/Under | Full Time' in line:
+            # We'll search subsequent lines for "Over 2.5" and "Under 2.5"
+            j = i + 1
+            while j < len(lines) and '|' not in lines[j]:
+                if lines[j].strip().lower() == 'over 2.5':
+                    try:
+                        over_odd = float(lines[j+1])
+                        if j+2 < len(lines) and lines[j+2].strip().lower() == 'under 2.5':
+                            under_odd = float(lines[j+3])
+                            markets['ou_2_5'] = [('Over', over_odd), ('Under', under_odd)]
+                    except:
+                        pass
+                j += 1
+            i = j
+            continue
+
         i += 1
-        selections = []
-        while i < len(lines) and '|' not in lines[i]:
-            label = lines[i]
-            if i+1 < len(lines):
-                try:
-                    odds = float(lines[i+1])
-                    selections.append((label, odds))
-                    i += 2
-                except ValueError:
-                    i += 1
-            else:
-                i += 1
-
-        if not selections:
-            continue
-
-        header_lower = header.lower()
-        parts = header.split('|')
-        parts = [p.strip() for p in parts]
-
-        # Default period full time
-        period = "0"
-        if 'first half' in header_lower:
-            period = "1"
-        elif 'second half' in header_lower:
-            period = "2"
-
-        # ---- Identify market type ----
-        # Ignore unsupported markets
-        if any(skip in header_lower for skip in [
-            'bookings', 'corner', 'multiscores', 'correct score', 'win to nil',
-            'team to score', 'odd/even', 'clean sheet', 'multigoals', 'interval',
-            'last corner', 'total corners', 'double chance and over/under'
-        ]):
-            continue
-
-        # 1X2
-        if '1x2' in header_lower and '1up' not in header_lower and '2up' not in header_lower:
-            if 'full time' in header_lower or 'first half' in header_lower:
-                markets.append({
-                    "header": header,
-                    "type": "1x2",
-                    "period": period,
-                    "line": None,
-                    "team": None,
-                    "selections": selections
-                })
-                continue
-
-        # Over/Under (regular total or team total)
-        if 'over/under' in header_lower:
-            # Check if there is a team name in header
-            # Team total if header has three parts and middle part is a team name
-            if len(parts) == 3 and 'full time' in parts[2].lower():
-                team_name = parts[1]
-                # Determine side
-                side = "home" if normalize(team_name) == normalize(home_name) else "away"
-                # Extract lines from selections
-                for sel in selections:
-                    label, odds = sel
-                    if label.lower().startswith('over'):
-                        line_str = label.split()[-1]
-                        try:
-                            line = float(line_str)
-                        except:
-                            continue
-                        markets.append({
-                            "header": f"{header} {line}",
-                            "type": "team_total",
-                            "period": period,
-                            "line": line,
-                            "side": side,
-                            "team": team_name,
-                            "selections": [("Over", odds)]
-                        })
-                        idx = selections.index(sel)
-                        if idx+1 < len(selections):
-                            under_sel = selections[idx+1]
-                            if under_sel[0].lower().startswith('under'):
-                                markets[-1]["selections"].append(("Under", under_sel[1]))
-                continue
-
-            # Regular total (no team name in header)
-            if len(parts) == 2 and ('full time' in parts[1].lower() or 'first half' in parts[1].lower() or 'second half' in parts[1].lower()):
-                for sel in selections:
-                    label, odds = sel
-                    if label.lower().startswith('over'):
-                        line_str = label.split()[-1]
-                        try:
-                            line = float(line_str)
-                        except:
-                            continue
-                        markets.append({
-                            "header": f"{header} {line}",
-                            "type": "total",
-                            "period": period,
-                            "line": line,
-                            "team": None,
-                            "side": None,
-                            "selections": [("Over", odds)]
-                        })
-                        idx = selections.index(sel)
-                        if idx+1 < len(selections):
-                            under_sel = selections[idx+1]
-                            if under_sel[0].lower().startswith('under'):
-                                markets[-1]["selections"].append(("Under", under_sel[1]))
-                continue
-
-            # "Total Score Over/Under" appears as team total but different header
-            if 'total score over/under' in header_lower:
-                # e.g., "Total Score Over/Under | First Half | Angers SCO"
-                team_name = parts[-1] if len(parts) >= 2 else ""
-                side = "home" if normalize(team_name) == normalize(home_name) else "away"
-                for sel in selections:
-                    label, odds = sel
-                    if label.lower().startswith('over'):
-                        line_str = label.split()[-1]
-                        try:
-                            line = float(line_str)
-                        except:
-                            continue
-                        markets.append({
-                            "header": f"{header} {line}",
-                            "type": "team_total",
-                            "period": period,
-                            "line": line,
-                            "side": side,
-                            "team": team_name,
-                            "selections": [("Over", odds)]
-                        })
-                        idx = selections.index(sel)
-                        if idx+1 < len(selections):
-                            under_sel = selections[idx+1]
-                            if under_sel[0].lower().startswith('under'):
-                                markets[-1]["selections"].append(("Under", under_sel[1]))
-                continue
-
-        # Double Chance, BTTS, Next Goal, Handicap can be added later if needed
 
     return markets
 
-def canonical_key_from_betpawa(market):
-    type_ = market["type"]
-    period = market.get("period", "0")
-    line = market.get("line")
-    side = market.get("side")
-    if type_ == "1x2":
-        return f"1x2_{period}"
-    elif type_ == "total":
-        return f"total_{period}_{line}"
-    elif type_ == "team_total":
-        return f"team_total_{period}_{side}_{line}"
-    return None
-
 def main():
     now_utc = datetime.now(timezone.utc)
+
+    # Fetch matches with markets, filter out specials
     all_docs = db.collection("matches").stream()
     matches_list = []
     for doc in all_docs:
@@ -258,7 +131,7 @@ def main():
         data["doc_id"] = doc.id
         matches_list.append(data)
 
-    matches_list = matches_list[:3]
+    matches_list = matches_list[:3]  # limit for testing
 
     if not matches_list:
         send_telegram("ℹ️ No suitable regular matches with markets found.")
@@ -276,7 +149,7 @@ def main():
             home_norm = normalize(home_raw)
             away_norm = normalize(away_raw)
 
-            # Build Pinnacle market index
+            # Build Pinnacle index for just 1x2 and total_0_2.5
             pinnacle_index = {}
             for pm in match.get("markets", []):
                 key = pm.get("key")
@@ -326,11 +199,13 @@ def main():
                             page.wait_for_timeout(5000)
                         except Exception:
                             continue
+
                         try:
                             body_text = page.inner_text("body")
                         except Exception:
                             body_text = ""
                         body_lower = strip_accents(body_text).lower()
+
                         if home_norm in body_lower and away_norm in body_lower:
                             correct_found = True
                             break
@@ -351,39 +226,51 @@ def main():
                     report_lines.append("❌ Correct match not found on Betpawa")
                     continue
 
-                # Parse Betpawa markets
-                bet_markets = parse_betpawa_page(body_text, home_raw, away_raw)
+                # Parse focused markets
+                bet_markets = parse_focused_markets(body_text)
 
-                matched_count = 0
-                for bm in bet_markets:
-                    ck = canonical_key_from_betpawa(bm)
-                    if not ck or ck not in pinnacle_index:
-                        continue
-                    pm = pinnacle_index[ck]
+                # 1X2 Full Time
+                if bet_markets['1x2'] and '1x2_0' in pinnacle_index:
+                    pm = pinnacle_index['1x2_0']
+                    bet_selections = bet_markets['1x2']
                     pinnacle_selections = pm.get("selections", [])
-                    bet_selections = bm["selections"]
-                    if len(bet_selections) != len(pinnacle_selections):
-                        continue
+                    if len(bet_selections) == len(pinnacle_selections):
+                        evs = []
+                        labels = ['1', 'X', '2']
+                        for label, (sel_label, bet_odd), ps in zip(labels, bet_selections, pinnacle_selections):
+                            tp = ps.get("true_prob")
+                            if tp is None:
+                                continue
+                            ev = (tp * bet_odd) - 1
+                            evs.append((label, bet_odd, tp, ev))
+                        if evs:
+                            report_lines.append("📌 1X2 | Full Time")
+                            for label, bet_odd, tp, ev in evs:
+                                flag = "🚀" if ev > MIN_EV else ""
+                                report_lines.append(f"   {label}: Betpawa {bet_odd} | TP {tp:.2f} | EV {ev*100:+.1f}% {flag}")
 
-                    evs = []
-                    for (label, bet_odd), ps in zip(bet_selections, pinnacle_selections):
-                        true_prob = ps.get("true_prob")
-                        if true_prob is None:
-                            continue
-                        ev = (true_prob * bet_odd) - 1
-                        evs.append((label, bet_odd, true_prob, ev))
+                # Over/Under 2.5 Full Time
+                if bet_markets['ou_2_5'] and 'total_0_2.5' in pinnacle_index:
+                    pm = pinnacle_index['total_0_2.5']
+                    bet_selections = bet_markets['ou_2_5']
+                    pinnacle_selections = pm.get("selections", [])
+                    if len(bet_selections) == len(pinnacle_selections):
+                        evs = []
+                        labels = ['Over', 'Under']
+                        for label, (sel_label, bet_odd), ps in zip(labels, bet_selections, pinnacle_selections):
+                            tp = ps.get("true_prob")
+                            if tp is None:
+                                continue
+                            ev = (tp * bet_odd) - 1
+                            evs.append((label, bet_odd, tp, ev))
+                        if evs:
+                            report_lines.append("📌 Over/Under 2.5 | Full Time")
+                            for label, bet_odd, tp, ev in evs:
+                                flag = "🚀" if ev > MIN_EV else ""
+                                report_lines.append(f"   {label}: Betpawa {bet_odd} | TP {tp:.2f} | EV {ev*100:+.1f}% {flag}")
 
-                    if not evs:
-                        continue
-
-                    report_lines.append(f"📌 {bm['header']} (canonical {ck})")
-                    for label, bet_odd, tp, ev in evs:
-                        flag = "🚀" if ev > MIN_EV else ""
-                        report_lines.append(f"   {label}: Betpawa {bet_odd} | TP {tp:.2f} | EV {ev*100:+.1f}% {flag}")
-                    matched_count += 1
-
-                if matched_count == 0:
-                    report_lines.append("ℹ️ No strict matches found.")
+                if not bet_markets['1x2'] and not bet_markets['ou_2_5']:
+                    report_lines.append("ℹ️ No supported markets found on Betpawa page.")
 
             except Exception as e:
                 report_lines.append(f"⚠️ Exception: {e}")
