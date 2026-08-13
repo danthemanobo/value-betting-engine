@@ -13,8 +13,8 @@ jobs:
           python-version: '3.10'
       - run: pip install -r requirements.txt
       - run: python -m playwright install --with-deps chromium
-      - name: Debug Betpawa market structure
+      - name: Debug correct Betpawa match
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python betpawa_structure_debug.py
+        run: python betpawa_correct_market_debug.py
