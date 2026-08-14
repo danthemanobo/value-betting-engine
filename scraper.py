@@ -76,7 +76,6 @@ def main():
         data["doc_id"] = doc.id
         matches_list.append(data)
 
-    matches_list = matches_list[:3]  # limit for testing
 
     if not matches_list:
         send_telegram("ℹ️ No suitable matches with 1X2 markets found.")
