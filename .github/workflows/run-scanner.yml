@@ -1,5 +1,7 @@
 name: Run Scanner
 on:
+  schedule:
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 jobs:
   scan:
@@ -10,7 +12,18 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install -r requirements.txt
-      - name: Clear Firestore matches
+      - run: python -m playwright install --with-deps chromium
+      - name: Run Pinnacle 1X2 scanner (TEST MODE)
         env:
+          PINNACLE_API_KEY: ${{ secrets.PINNACLE_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-        run: python clear_matches.py
+          TEST_MODE: 'true'
+        run: python scanner.py
+      - name: Run Betpawa 1X2 scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: python scraper.py
