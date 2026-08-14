@@ -19,7 +19,7 @@ def send_telegram(text):
     for i in range(0, len(text), max_len):
         chunk = text[i:i+max_len]
         try:
-            requests.post(url, json={"chat_id": CHAT_ID, "text": chunk}, timeout=15)
+            requests.post(url, json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "HTML"}, timeout=15)
         except Exception as e:
             print(f"Telegram error: {e}")
 
@@ -31,7 +31,6 @@ def normalize(name):
 
 def exact_team_match(name, text_lower):
     """Check if team name appears as a whole word/phrase."""
-    # Escape regex special characters and use word boundaries
     pattern = r'(?<!\w)' + re.escape(normalize(name)) + r'(?!\w)'
     return re.search(pattern, text_lower) is not None
 
@@ -54,13 +53,22 @@ def parse_1x2(body_text):
 def main():
     now_utc = datetime.now(timezone.utc)
 
-    # Fetch matches with markets, filter out specials
+    # Fetch matches with markets
     all_docs = db.collection("matches").stream()
     matches_list = []
     for doc in all_docs:
         data = doc.to_dict()
         if "markets" not in data or not isinstance(data.get("markets"), list) or len(data["markets"]) == 0:
             continue
+        # Only process matches that have a 1X2 market
+        has_1x2 = False
+        for market in data["markets"]:
+            if market.get("key") == "s;0;m":
+                has_1x2 = True
+                break
+        if not has_1x2:
+            continue
+        # Filter special markets (corners/bookings)
         home = data.get("home", "")
         away = data.get("away", "")
         if "(Corners)" in home or "(Corners)" in away or "(Bookings)" in home or "(Bookings)" in away:
@@ -68,10 +76,10 @@ def main():
         data["doc_id"] = doc.id
         matches_list.append(data)
 
-    matches_list = matches_list[:3]
+    matches_list = matches_list[:3]  # limit for testing
 
     if not matches_list:
-        send_telegram("ℹ️ No suitable regular matches with markets found.")
+        send_telegram("ℹ️ No suitable matches with 1X2 markets found.")
         return
 
     report_lines = [f"📊 Processing {len(matches_list)} matches."]
@@ -86,11 +94,13 @@ def main():
             home_norm = normalize(home_raw)
             away_norm = normalize(away_raw)
 
-            # Find Pinnacle 1X2 true probabilities
+            # Extract true probabilities from the stored 1X2 market
             true_probs = None
-            for pm in match.get("markets", []):
-                if pm.get("key") == "s;0;m":
-                    true_probs = [s["true_prob"] for s in pm.get("selections", [])]
+            for market in match["markets"]:
+                if market.get("key") == "s;0;m":
+                    selections = market.get("selections", [])
+                    if len(selections) == 3:
+                        true_probs = [s["true_prob"] for s in selections]
                     break
             if not true_probs:
                 continue
@@ -98,13 +108,16 @@ def main():
             report_lines.append(f"\n⚽ {home_raw} vs {away_raw}")
 
             try:
+                # Navigate to Betpawa events page
                 page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
                 page.wait_for_timeout(3000)
 
+                # Click search icon
                 search_icon = page.query_selector("button[aria-label*='search' i]")
                 if search_icon:
                     search_icon.click()
                     page.wait_for_timeout(1000)
+
                 search_input = page.query_selector('input[type="search"], input[type="text"], input:not([type])')
                 if not search_input:
                     report_lines.append("❌ Search input missing")
@@ -162,6 +175,7 @@ def main():
                     report_lines.append("❌ Correct match not found on Betpawa")
                     continue
 
+                # Parse 1X2 odds
                 bet_1x2 = parse_1x2(body_text)
 
                 if bet_1x2 and len(bet_1x2) == 3:
