@@ -7,6 +7,7 @@ initialize_app(cred)
 db = firestore.client()
 
 def main():
+    # Delete all documents in the "matches" collection
     docs = db.collection("matches").stream()
     count = 0
     for doc in docs:
