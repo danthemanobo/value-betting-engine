@@ -19,7 +19,7 @@ def send_telegram(text):
     for i in range(0, len(text), max_len):
         chunk = text[i:i+max_len]
         try:
-            requests.post(url, json={"chat_id": CHAT_ID, "text": chunk, "parse_mode": "HTML"}, timeout=15)
+            requests.post(url, json={"chat_id": CHAT_ID, "text": chunk}, timeout=15)
         except Exception as e:
             print(f"Telegram error: {e}")
 
@@ -29,90 +29,27 @@ def strip_accents(s):
 def normalize(name):
     return re.sub(r'\s+', ' ', strip_accents(name).replace('-', ' ')).strip().lower()
 
-def parse_pinnacle_key(key):
-    """Extract info from Pinnacle key."""
-    parts = key.split(';')
-    if len(parts) < 3:
-        return None
-    period = parts[1]
-    code = parts[2]
-    info = {"period": period, "type": None, "line": None, "side": None}
-    if code == 'm':
-        info["type"] = "1x2"
-    elif code == 'ou':
-        info["type"] = "total"
-        if len(parts) > 3:
-            info["line"] = parts[3]
-    elif code == 'tt':
-        info["type"] = "team_total"
-        if len(parts) > 3:
-            info["line"] = parts[3]
-        if len(parts) > 4:
-            info["side"] = parts[4]
-    else:
-        return None
-    return info
+def exact_team_match(name, text_lower):
+    """Check if team name appears as a whole word/phrase."""
+    # Escape regex special characters and use word boundaries
+    pattern = r'(?<!\w)' + re.escape(normalize(name)) + r'(?!\w)'
+    return re.search(pattern, text_lower) is not None
 
-def canonical_key_from_pinnacle(info):
-    period = info.get("period", "0")
-    type_ = info.get("type")
-    line = info.get("line")
-    if type_ == "1x2":
-        return f"1x2_{period}"
-    elif type_ == "total":
-        return f"total_{period}_{line}"
-    elif type_ == "team_total":
-        side = info.get("side")
-        return f"team_total_{period}_{side}_{line}"
-    return None
-
-def parse_focused_markets(body_text):
-    """
-    Extract only 1X2 Full Time and Over/Under 2.5 Full Time.
-    Returns dict with keys '1x2' and 'ou_2_5', each containing selections list.
-    """
+def parse_1x2(body_text):
+    """Extract 1X2 Full Time odds from Betpawa page text."""
     lines = [l.strip() for l in body_text.split('\n') if l.strip()]
-    markets = {'1x2': None, 'ou_2_5': None}
-
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if '1X2 | Full Time' in line:
-            # Next three lines should be label, odds, label, odds, label, odds
-            try:
-                if i+6 <= len(lines):
-                    home_label = lines[i+1]
+    for i, line in enumerate(lines):
+        if line == "1X2 | Full Time":
+            if i+6 <= len(lines):
+                try:
                     home_odd = float(lines[i+2])
-                    draw_label = lines[i+3]
                     draw_odd = float(lines[i+4])
-                    away_label = lines[i+5]
                     away_odd = float(lines[i+6])
-                    if home_label == '1' and draw_label == 'X' and away_label == '2':
-                        markets['1x2'] = [('home', home_odd), ('draw', draw_odd), ('away', away_odd)]
-            except:
-                pass
-            i += 1
-            continue
-
-        if 'Over/Under | Full Time' in line:
-            # We'll search subsequent lines for "Over 2.5" and "Under 2.5"
-            j = i + 1
-            while j < len(lines) and '|' not in lines[j]:
-                if lines[j].strip().lower() == 'over 2.5':
-                    try:
-                        over_odd = float(lines[j+1])
-                        if j+2 < len(lines) and lines[j+2].strip().lower() == 'under 2.5':
-                            under_odd = float(lines[j+3])
-                            markets['ou_2_5'] = [('Over', over_odd), ('Under', under_odd)]
-                    except:
-                        pass
-                j += 1
-            i = j
-            continue
-
-        i += 1
-
-    return markets
+                    if lines[i+1] == '1' and lines[i+3] == 'X' and lines[i+5] == '2':
+                        return [('home', home_odd), ('draw', draw_odd), ('away', away_odd)]
+                except:
+                    pass
+    return None
 
 def main():
     now_utc = datetime.now(timezone.utc)
@@ -131,7 +68,7 @@ def main():
         data["doc_id"] = doc.id
         matches_list.append(data)
 
-    matches_list = matches_list[:3]  # limit for testing
+    matches_list = matches_list[:3]
 
     if not matches_list:
         send_telegram("ℹ️ No suitable regular matches with markets found.")
@@ -149,20 +86,18 @@ def main():
             home_norm = normalize(home_raw)
             away_norm = normalize(away_raw)
 
-            # Build Pinnacle index for just 1x2 and total_0_2.5
-            pinnacle_index = {}
+            # Find Pinnacle 1X2 true probabilities
+            true_probs = None
             for pm in match.get("markets", []):
-                key = pm.get("key")
-                info = parse_pinnacle_key(key)
-                if info:
-                    ck = canonical_key_from_pinnacle(info)
-                    if ck:
-                        pinnacle_index[ck] = pm
+                if pm.get("key") == "s;0;m":
+                    true_probs = [s["true_prob"] for s in pm.get("selections", [])]
+                    break
+            if not true_probs:
+                continue
 
             report_lines.append(f"\n⚽ {home_raw} vs {away_raw}")
 
             try:
-                # Navigate and search for home team
                 page.goto("https://www.betpawa.ng/events?categoryId=2&marketId=1X2", timeout=30000, wait_until="networkidle")
                 page.wait_for_timeout(3000)
 
@@ -206,7 +141,8 @@ def main():
                             body_text = ""
                         body_lower = strip_accents(body_text).lower()
 
-                        if home_norm in body_lower and away_norm in body_lower:
+                        # Strict exact match
+                        if exact_team_match(home_raw, body_lower) and exact_team_match(away_raw, body_lower):
                             correct_found = True
                             break
                         else:
@@ -226,51 +162,20 @@ def main():
                     report_lines.append("❌ Correct match not found on Betpawa")
                     continue
 
-                # Parse focused markets
-                bet_markets = parse_focused_markets(body_text)
+                bet_1x2 = parse_1x2(body_text)
 
-                # 1X2 Full Time
-                if bet_markets['1x2'] and '1x2_0' in pinnacle_index:
-                    pm = pinnacle_index['1x2_0']
-                    bet_selections = bet_markets['1x2']
-                    pinnacle_selections = pm.get("selections", [])
-                    if len(bet_selections) == len(pinnacle_selections):
-                        evs = []
-                        labels = ['1', 'X', '2']
-                        for label, (sel_label, bet_odd), ps in zip(labels, bet_selections, pinnacle_selections):
-                            tp = ps.get("true_prob")
-                            if tp is None:
-                                continue
-                            ev = (tp * bet_odd) - 1
-                            evs.append((label, bet_odd, tp, ev))
-                        if evs:
-                            report_lines.append("📌 1X2 | Full Time")
-                            for label, bet_odd, tp, ev in evs:
-                                flag = "🚀" if ev > MIN_EV else ""
-                                report_lines.append(f"   {label}: Betpawa {bet_odd} | TP {tp:.2f} | EV {ev*100:+.1f}% {flag}")
-
-                # Over/Under 2.5 Full Time
-                if bet_markets['ou_2_5'] and 'total_0_2.5' in pinnacle_index:
-                    pm = pinnacle_index['total_0_2.5']
-                    bet_selections = bet_markets['ou_2_5']
-                    pinnacle_selections = pm.get("selections", [])
-                    if len(bet_selections) == len(pinnacle_selections):
-                        evs = []
-                        labels = ['Over', 'Under']
-                        for label, (sel_label, bet_odd), ps in zip(labels, bet_selections, pinnacle_selections):
-                            tp = ps.get("true_prob")
-                            if tp is None:
-                                continue
-                            ev = (tp * bet_odd) - 1
-                            evs.append((label, bet_odd, tp, ev))
-                        if evs:
-                            report_lines.append("📌 Over/Under 2.5 | Full Time")
-                            for label, bet_odd, tp, ev in evs:
-                                flag = "🚀" if ev > MIN_EV else ""
-                                report_lines.append(f"   {label}: Betpawa {bet_odd} | TP {tp:.2f} | EV {ev*100:+.1f}% {flag}")
-
-                if not bet_markets['1x2'] and not bet_markets['ou_2_5']:
-                    report_lines.append("ℹ️ No supported markets found on Betpawa page.")
+                if bet_1x2 and len(bet_1x2) == 3:
+                    evs = []
+                    labels = ['1', 'X', '2']
+                    for label, (sel_name, bet_odd), tp in zip(labels, bet_1x2, true_probs):
+                        ev = (tp * bet_odd) - 1
+                        evs.append((label, bet_odd, tp, ev))
+                    report_lines.append("📌 1X2 | Full Time")
+                    for label, bet_odd, tp, ev in evs:
+                        flag = "🚀" if ev > MIN_EV else ""
+                        report_lines.append(f"   {label}: Betpawa {bet_odd} | TP {tp:.2f} | EV {ev*100:+.1f}% {flag}")
+                else:
+                    report_lines.append("❌ 1X2 market not found on Betpawa page")
 
             except Exception as e:
                 report_lines.append(f"⚠️ Exception: {e}")
